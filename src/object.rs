@@ -9,6 +9,16 @@ const INTEGER_BITS: usize = BITS_PER_WORD - INTEGER_SHIFT;
 pub(crate) const INTEGER_MAX: Word = (1 << (INTEGER_BITS - 1)) - 1;
 pub(crate) const INTEGER_MIN: Word = -(1 << (INTEGER_BITS - 1));
 
+const IMMEDIATE_TAG_MASK: usize = 0x3f;
+
+const CHAR_TAG: usize = 0xf;
+const CHAR_MASK: usize = 0xff;
+const CHAR_SHIFT: usize = 8;
+
+const BOOL_TAG: usize = 0x1f;
+const BOOL_MASK: usize = 0x80;
+const BOOL_SHIFT: usize = 7;
+
 #[derive(Debug)]
 pub(crate) enum Error {
     IntegerOutOfRange,
@@ -32,6 +42,30 @@ pub(crate) fn encode_integer(value: Word) -> Result<Word> {
     }
 }
 
+pub(crate) fn decode_integer(value: Word) -> Word {
+    (value >> INTEGER_SHIFT) | INTEGER_TAG as Word
+}
+
+pub(crate) fn encode_char(value: char) -> Word {
+    ((value as Word) << CHAR_SHIFT) | CHAR_TAG as Word
+}
+
+pub(crate) fn decode_char(value: Word) -> char {
+    ((value >> CHAR_SHIFT) & CHAR_MASK as Word) as u8 as char
+}
+
+pub(crate) fn encode_bool(value: bool) -> Word {
+    ((if value { 1 } else { 0 } << BOOL_SHIFT) | BOOL_TAG) as Word
+}
+
+pub(crate) fn decode_bool(value: Word) -> bool {
+    value & BOOL_MASK as Word != 0
+}
+
+pub(crate) fn nil() -> Word {
+    0x2f
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -52,5 +86,29 @@ mod tests {
         assert_eq!(0xfffffffffffffffcu64, encode_integer(-1)? as u64);
         assert_eq!(0xffffffffffffffd8u64, encode_integer(-10)? as u64);
         Ok(())
+    }
+
+    #[test]
+    fn encode_char() {
+        assert_eq!(super::encode_char('\0'), 0xf);
+        assert_eq!(super::encode_char('a'), 0x610f);
+    }
+
+    #[test]
+    fn decode_char() {
+        assert_eq!(super::decode_char(0xf), '\0');
+        assert_eq!(super::decode_char(0x610f), 'a');
+    }
+
+    #[test]
+    fn encode_bool() {
+        assert_eq!(super::encode_bool(true), 0x9f);
+        assert_eq!(super::encode_bool(false), 0x1f);
+    }
+
+    #[test]
+    fn decode_bool() {
+        assert_eq!(super::decode_bool(0x9f), true);
+        assert_eq!(super::decode_bool(0x1f), false);
     }
 }
