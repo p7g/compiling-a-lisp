@@ -1,23 +1,29 @@
 pub(crate) type Word = i64;
 pub(crate) type Uword = u64;
-const BITS_PER_WORD: usize = 8 * std::mem::size_of::<Word>();
+pub(crate) const BITS_PER_WORD: usize = 8 * std::mem::size_of::<Word>();
 
-const INTEGER_TAG: usize = 0;
-const INTEGER_TAG_MASK: usize = 3;
-const INTEGER_SHIFT: usize = 2;
-const INTEGER_BITS: usize = BITS_PER_WORD - INTEGER_SHIFT;
+pub(crate) const INTEGER_TAG: usize = 0;
+pub(crate) const INTEGER_TAG_MASK: usize = 3;
+pub(crate) const INTEGER_SHIFT: usize = 2;
+pub(crate) const INTEGER_BITS: usize = BITS_PER_WORD - INTEGER_SHIFT;
 pub(crate) const INTEGER_MAX: Word = (1 << (INTEGER_BITS - 1)) - 1;
 pub(crate) const INTEGER_MIN: Word = -(1 << (INTEGER_BITS - 1));
 
-const IMMEDIATE_TAG_MASK: usize = 0x3f;
+pub(crate) const IMMEDIATE_TAG_MASK: usize = 0x3f;
 
-const CHAR_TAG: usize = 0xf;
-const CHAR_MASK: usize = 0xff;
-const CHAR_SHIFT: usize = 8;
+pub(crate) const CHAR_TAG: usize = 0xf;
+pub(crate) const CHAR_MASK: usize = 0xff;
+pub(crate) const CHAR_SHIFT: usize = 8;
 
-const BOOL_TAG: usize = 0x1f;
-const BOOL_MASK: usize = 0x80;
-const BOOL_SHIFT: usize = 7;
+pub(crate) const BOOL_TAG: usize = 0x1f;
+pub(crate) const BOOL_MASK: usize = 0x80;
+pub(crate) const BOOL_SHIFT: usize = 7;
+
+pub(crate) const PAIR_TAG: usize = 0x1;
+pub(crate) const HEAP_TAG_MASK: Uword = 0x7;
+pub(crate) const HEAP_PTR_MASK: Uword = !HEAP_TAG_MASK;
+
+pub(crate) const SYMBOL_TAG: usize = 0x5;
 
 #[derive(Debug)]
 pub(crate) enum Error {

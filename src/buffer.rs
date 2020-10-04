@@ -1,5 +1,5 @@
 use crate::exec::Exec;
-use memmap::{Mmap, MmapMut};
+use memmap::MmapMut;
 
 pub(crate) struct Buffer {
     pos: usize,
