@@ -22,6 +22,13 @@ impl ASTNode {
     pub(crate) fn new_unary_call(name: String, arg: ASTNode) -> Self {
         Self::list2(Self::Symbol(Symbol::new(name)), arg)
     }
+
+    pub(crate) fn new_binary_call(name: String, arg1: ASTNode, arg2: ASTNode) -> Self {
+        Self::Pair(Box::new(Pair::new(
+            Self::Symbol(Symbol::new(name)),
+            Self::list2(arg1, arg2),
+        )))
+    }
 }
 
 #[derive(Debug, PartialEq)]

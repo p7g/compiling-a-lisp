@@ -52,6 +52,15 @@ impl Buffer {
         }
         Ok(())
     }
+
+    pub(crate) fn write_slice(&mut self, slice: &[u8]) -> std::io::Result<()> {
+        self.ensure_capacity(slice.len())?;
+        for b in slice.iter() {
+            self.mem[self.pos] = *b;
+            self.pos += 1;
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
