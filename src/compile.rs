@@ -1,6 +1,8 @@
 use crate::ast::{ASTNode, Pair};
 use crate::buffer::Buffer;
-use crate::emit::{Condition, Emit, Register, RegisterPiece};
+use crate::emit::{
+    Condition, Emit, Indirect, Register, RegisterPiece, FUNCTION_EPILOGUE, FUNCTION_PROLOGUE,
+};
 use crate::object;
 use std::convert::TryInto;
 use std::num::TryFromIntError;
@@ -12,6 +14,21 @@ pub(crate) enum Error {
     IOError(std::io::Error),
     NotImplemented(String),
 }
+
+macro_rules! impl_from_error {
+    ($typ:ty, $variant:path) => {
+        impl From<$typ> for Error {
+            fn from(e: $typ) -> Error {
+                $variant(e)
+            }
+        }
+    };
+}
+
+impl_from_error!(std::io::Error, Error::IOError);
+impl_from_error!(object::Error, Error::ObjectError);
+impl_from_error!(TryFromIntError, Error::ConversionError);
+impl_from_error!(String, Error::NotImplemented);
 
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
@@ -34,15 +51,11 @@ impl Compiler {
         self.emit.finish()
     }
 
-    pub(crate) fn compile_expr(&mut self, node: &ASTNode) -> Result<(), Error> {
+    pub(crate) fn compile_expr(&mut self, node: &ASTNode, stack_index: isize) -> Result<(), Error> {
         match node {
-            ASTNode::Integer(w) => self.emit.mov_reg_imm32(
-                Register::RAX,
-                object::encode_integer(*w)
-                    .map_err(Error::ObjectError)?
-                    .try_into()
-                    .map_err(Error::ConversionError)?,
-            ),
+            ASTNode::Integer(w) => self
+                .emit
+                .mov_reg_imm32(Register::RAX, object::encode_integer(*w)?.try_into()?),
             ASTNode::Char(c) => self
                 .emit
                 .mov_reg_imm32(Register::RAX, object::encode_char(*c) as i32),
@@ -50,19 +63,20 @@ impl Compiler {
                 .emit
                 .mov_reg_imm32(Register::RAX, object::encode_bool(*b) as i32),
             ASTNode::Nil => self.emit.mov_reg_imm32(Register::RAX, object::nil() as i32),
-            ASTNode::Pair(p) => Ok(self.compile_call(&*p)?),
+            ASTNode::Pair(p) => Ok(self.compile_call(&*p, stack_index)?),
             _ => unimplemented!(),
-        }
-        .map_err(Error::IOError)
-    }
-
-    pub(crate) fn compile_function(&mut self, node: &ASTNode) -> Result<(), Error> {
-        self.compile_expr(node)?;
-        self.emit.ret().map_err(Error::IOError)?;
+        }?;
         Ok(())
     }
 
-    pub(crate) fn compile_call(&mut self, pair: &Pair) -> Result<(), Error> {
+    pub(crate) fn compile_function(&mut self, node: &ASTNode) -> Result<(), Error> {
+        self.emit.buf_mut().write_slice(FUNCTION_PROLOGUE)?;
+        self.compile_expr(node, -(object::WORD_SIZE as isize))?;
+        self.emit.buf_mut().write_slice(FUNCTION_EPILOGUE)?;
+        Ok(())
+    }
+
+    pub(crate) fn compile_call(&mut self, pair: &Pair, stack_index: isize) -> Result<(), Error> {
         let Pair {
             car: callable,
             cdr: args,
@@ -74,81 +88,110 @@ impl Compiler {
                 cdr: ASTNode::Nil,
             } = p
             {
+                self.compile_expr(arg, stack_index)?;
                 match sym.name() {
-                    "add1" => {
-                        self.compile_expr(arg)?;
-                        self.emit
-                            .add_reg_imm32(
-                                Register::RAX,
-                                object::encode_integer(1).map_err(Error::ObjectError)? as i32,
-                            )
-                            .map_err(Error::IOError)?;
-                    }
-                    "sub1" => {
-                        self.compile_expr(arg)?;
-                        self.emit
-                            .sub_reg_imm32(
-                                Register::RAX,
-                                object::encode_integer(1).map_err(Error::ObjectError)? as i32,
-                            )
-                            .map_err(Error::IOError)?;
-                    }
+                    "add1" => self
+                        .emit
+                        .add_reg_imm32(Register::RAX, object::encode_integer(1)? as i32)?,
+                    "sub1" => self
+                        .emit
+                        .sub_reg_imm32(Register::RAX, object::encode_integer(1)? as i32)?,
                     "integer->char" => {
-                        self.compile_expr(arg)?;
-                        self.emit
-                            .shl_reg_imm8(
-                                Register::RAX,
-                                (object::CHAR_SHIFT - object::INTEGER_SHIFT) as i8,
-                            )
-                            .map_err(Error::IOError)?;
-                        self.emit
-                            .or_reg_imm8(Register::RAX, object::CHAR_TAG as u8)
-                            .map_err(Error::IOError)?;
-                    }
-                    "char->integer" => {
-                        self.compile_expr(arg)?;
-                        self.emit
-                            .shr_reg_imm8(
-                                Register::RAX,
-                                (object::CHAR_SHIFT - object::INTEGER_SHIFT) as i8,
-                            )
-                            .map_err(Error::IOError)?;
-                    }
-                    "nil?" => {
-                        self.compile_expr(arg)?;
-                        self.compile_compare_imm32(object::nil() as i32)?;
-                    }
-                    "zero?" => {
-                        self.compile_expr(arg)?;
-                        self.compile_compare_imm32(
-                            object::encode_integer(0).map_err(Error::ObjectError)? as i32,
+                        self.emit.shl_reg_imm8(
+                            Register::RAX,
+                            (object::CHAR_SHIFT - object::INTEGER_SHIFT) as i8,
                         )?;
-                    }
-                    "not" => {
-                        self.compile_expr(arg)?;
-                        self.compile_compare_imm32(object::encode_bool(false) as i32)?;
-                    }
-                    "integer?" => {
-                        self.compile_expr(arg)?;
                         self.emit
-                            .and_reg_imm8(Register::RAX, object::INTEGER_TAG_MASK as u8)
-                            .map_err(Error::IOError)?;
+                            .or_reg_imm8(Register::RAX, object::CHAR_TAG as u8)?;
+                    }
+                    "char->integer" => self.emit.shr_reg_imm8(
+                        Register::RAX,
+                        (object::CHAR_SHIFT - object::INTEGER_SHIFT) as i8,
+                    )?,
+                    "nil?" => self.compile_compare_imm32(object::nil() as i32)?,
+                    "zero?" => self.compile_compare_imm32(object::encode_integer(0)? as i32)?,
+                    "not" => self.compile_compare_imm32(object::encode_bool(false) as i32)?,
+                    "integer?" => {
+                        self.emit
+                            .and_reg_imm8(Register::RAX, object::INTEGER_TAG_MASK as u8)?;
                         self.compile_compare_imm32(object::INTEGER_TAG as i32)?;
                     }
                     "boolean?" => {
-                        self.compile_expr(arg)?;
                         self.emit
-                            .and_reg_imm8(Register::RAX, object::IMMEDIATE_TAG_MASK as u8)
-                            .map_err(Error::IOError)?;
+                            .and_reg_imm8(Register::RAX, object::IMMEDIATE_TAG_MASK as u8)?;
                         self.compile_compare_imm32(object::BOOL_TAG as i32)?;
                     }
-                    name => return Err(Error::NotImplemented(name.to_string())),
+                    name => return Err(Error::NotImplemented(format!("unary {}", name))),
                 }
 
                 Ok(())
+            } else if let Pair {
+                car: a,
+                cdr: ASTNode::Pair(p),
+            } = p
+            {
+                let p: &Pair = p;
+                if let Pair {
+                    car: b,
+                    cdr: ASTNode::Nil,
+                } = p
+                {
+                    self.compile_expr(b, stack_index)?;
+                    self.emit
+                        .store_reg_indirect(Indirect(Register::RBP, stack_index), Register::RAX)?;
+                    self.compile_expr(a, stack_index - object::WORD_SIZE as isize)?;
+                    match sym.name() {
+                        "+" => self.emit.add_reg_indirect(
+                            Register::RAX,
+                            Indirect(Register::RBP, stack_index),
+                        )?,
+                        "-" => self.emit.sub_reg_indirect(
+                            Register::RAX,
+                            Indirect(Register::RBP, stack_index),
+                        )?,
+                        "*" => {
+                            self.emit
+                                .mul_reg_indirect(Indirect(Register::RBP, stack_index))?;
+                            // Remove the extra tag (which is now 0b0000)
+                            self.emit
+                                .shr_reg_imm8(Register::RAX, object::INTEGER_SHIFT as i8)?;
+                        }
+                        "=" => {
+                            self.emit.cmp_reg_indirect(
+                                Register::RAX,
+                                Indirect(Register::RBP, stack_index),
+                            )?;
+                            self.emit
+                                .mov_reg_imm32(Register::RAX, object::encode_integer(0)? as i32)?;
+                            self.emit.setcc_imm8(Condition::Equal, RegisterPiece::Al)?;
+                            self.emit
+                                .shl_reg_imm8(Register::RAX, object::BOOL_SHIFT as i8)?;
+                            self.emit
+                                .or_reg_imm8(Register::RAX, object::BOOL_TAG as u8)?;
+                        }
+                        "<" => {
+                            self.emit.cmp_reg_indirect(
+                                Register::RAX,
+                                Indirect(Register::RBP, stack_index),
+                            )?;
+                            self.emit
+                                .mov_reg_imm32(Register::RAX, object::encode_integer(0)? as i32)?;
+                            self.emit.setcc_imm8(Condition::Less, RegisterPiece::Al)?;
+                            self.emit
+                                .shl_reg_imm8(Register::RAX, object::BOOL_SHIFT as i8)?;
+                            self.emit
+                                .or_reg_imm8(Register::RAX, object::BOOL_TAG as u8)?;
+                        }
+                        name => return Err(Error::NotImplemented(format!("binary {}", name))),
+                    }
+
+                    Ok(())
+                } else {
+                    unreachable!("Improper list in AST?");
+                }
             } else {
                 Err(Error::NotImplemented(
-                    "non-unary function calls".to_string(),
+                    "non-unary/binary function calls".to_string(),
                 ))
             }
         } else {
@@ -157,21 +200,14 @@ impl Compiler {
     }
 
     fn compile_compare_imm32(&mut self, value: i32) -> Result<(), Error> {
+        self.emit.cmp_reg_imm32(Register::RAX, value)?;
+        self.emit.mov_reg_imm32(Register::RAX, 0)?;
+        self.emit.setcc_imm8(Condition::Equal, RegisterPiece::Al)?;
         self.emit
-            .cmp_reg_imm32(Register::RAX, value)
-            .map_err(Error::IOError)?;
+            .shl_reg_imm8(Register::RAX, object::BOOL_SHIFT as i8)?;
         self.emit
-            .mov_reg_imm32(Register::RAX, 0)
-            .map_err(Error::IOError)?;
-        self.emit
-            .setcc_imm8(Condition::Equal, RegisterPiece::Al)
-            .map_err(Error::IOError)?;
-        self.emit
-            .shl_reg_imm8(Register::RAX, object::BOOL_SHIFT as i8)
-            .map_err(Error::IOError)?;
-        self.emit
-            .or_reg_imm8(Register::RAX, object::BOOL_TAG as u8)
-            .map_err(Error::IOError)
+            .or_reg_imm8(Register::RAX, object::BOOL_TAG as u8)?;
+        Ok(())
     }
 }
 
@@ -181,6 +217,15 @@ mod tests {
 
     type Result = std::result::Result<(), Box<dyn std::error::Error>>;
 
+    fn assert_function_contents(buf: &[u8], expected: &[u8]) {
+        assert!(buf.starts_with(FUNCTION_PROLOGUE));
+        assert_eq!(
+            &buf[FUNCTION_PROLOGUE.len()..buf.len() - FUNCTION_EPILOGUE.len()],
+            expected
+        );
+        assert!(buf.ends_with(FUNCTION_EPILOGUE));
+    }
+
     #[test]
     fn compile_positive_integer() -> Result {
         let value: object::Word = 123;
@@ -188,8 +233,8 @@ mod tests {
         let mut compiler = Compiler::new(Emit::new(Buffer::new(10)?));
         compiler.compile_function(&node)?;
         let buf = compiler.finish();
-        let expected = &[0x48, 0xc7, 0xc0, 0xec, 0x01, 0x00, 0x00, 0xc3];
-        assert_eq!(expected, buf.code());
+        let expected = &[0x48, 0xc7, 0xc0, 0xec, 0x01, 0x00, 0x00];
+        assert_function_contents(buf.code(), expected);
         assert_eq!(
             buf.make_executable()?.exec(),
             object::encode_integer(value)?.try_into()?
@@ -204,8 +249,8 @@ mod tests {
         let mut compiler = Compiler::new(Emit::new(Buffer::new(10)?));
         compiler.compile_function(&node)?;
         let buf = compiler.finish();
-        let expected = &[0x48, 0xc7, 0xc0, 0x14, 0xfe, 0xff, 0xff, 0xc3];
-        assert_eq!(expected, buf.code());
+        let expected = &[0x48, 0xc7, 0xc0, 0x14, 0xfe, 0xff, 0xff];
+        assert_function_contents(buf.code(), expected);
         assert_eq!(
             buf.make_executable()?.exec(),
             object::encode_integer(value)?.try_into()?
@@ -220,8 +265,8 @@ mod tests {
         let mut compiler = Compiler::new(Emit::new(Buffer::new(10)?));
         compiler.compile_function(&node)?;
         let buf = compiler.finish();
-        let expected = &[0x48, 0xc7, 0xc0, 0x0f, 0x61, 0x00, 0x00, 0xc3];
-        assert_eq!(expected, buf.code());
+        let expected = &[0x48, 0xc7, 0xc0, 0x0f, 0x61, 0x00, 0x00];
+        assert_function_contents(buf.code(), expected);
         assert_eq!(
             buf.make_executable()?.exec(),
             object::encode_char(value).try_into()?
@@ -244,9 +289,8 @@ mod tests {
                 0x00,
                 0x00,
                 0x00,
-                0xc3,
             ];
-            assert_eq!(expected, buf.code());
+            assert_function_contents(buf.code(), expected);
             assert_eq!(
                 buf.make_executable()?.exec(),
                 object::encode_bool(*value).try_into()?
@@ -261,8 +305,8 @@ mod tests {
         let mut compiler = Compiler::new(Emit::new(Buffer::new(10)?));
         compiler.compile_function(&node)?;
         let buf = compiler.finish();
-        let expected = &[0x48, 0xc7, 0xc0, 0x2f, 0x00, 0x00, 0x00, 0xc3];
-        assert_eq!(expected, buf.code());
+        let expected = &[0x48, 0xc7, 0xc0, 0x2f, 0x00, 0x00, 0x00];
+        assert_function_contents(buf.code(), expected);
         assert_eq!(buf.make_executable()?.exec(), object::nil().try_into()?);
         Ok(())
     }
@@ -273,10 +317,10 @@ mod tests {
         let mut compiler = Compiler::new(Emit::new(Buffer::new(10)?));
         compiler.compile_function(&node)?;
         let expected = &[
-            0x48, 0xc7, 0xc0, 0xec, 0x01, 0x00, 0x00, 0x48, 0x05, 0x04, 0x00, 0x00, 0x00, 0xc3,
+            0x48, 0xc7, 0xc0, 0xec, 0x01, 0x00, 0x00, 0x48, 0x05, 0x04, 0x00, 0x00, 0x00,
         ];
         let buf = compiler.finish();
-        assert_eq!(expected, buf.code());
+        assert_function_contents(buf.code(), expected);
         assert_eq!(
             buf.make_executable()?.exec(),
             object::encode_integer(124)? as i32
@@ -291,10 +335,10 @@ mod tests {
         compiler.compile_function(&node)?;
         // mov rax, imm(123); sub rax, imm(1); ret
         let expected = &[
-            0x48, 0xc7, 0xc0, 0xec, 0x01, 0x00, 0x00, 0x48, 0x2d, 0x04, 0x00, 0x00, 0x00, 0xc3,
+            0x48, 0xc7, 0xc0, 0xec, 0x01, 0x00, 0x00, 0x48, 0x2d, 0x04, 0x00, 0x00, 0x00,
         ];
         let buf = compiler.finish();
-        assert_eq!(expected, buf.code());
+        assert_function_contents(buf.code(), expected);
         assert_eq!(
             buf.make_executable()?.exec(),
             object::encode_integer(122)? as i32
@@ -309,11 +353,10 @@ mod tests {
         compiler.compile_function(&node)?;
         // mov rax, imm(97); shl rax, 6; or rax, 0xf, ret
         let expected = &[
-            0x48, 0xc7, 0xc0, 0x84, 0x01, 0x00, 0x00, 0x48, 0xc1, 0xe0, 0x06, 0x48, 0x83, 0xc8,
-            0xf, 0xc3,
+            0x48, 0xc7, 0xc0, 0x84, 0x01, 0x00, 0x00, 0x48, 0xc1, 0xe0, 0x06, 0x48, 0x83, 0xc8, 0xf,
         ];
         let buf = compiler.finish();
-        assert_eq!(expected, buf.code());
+        assert_function_contents(buf.code(), expected);
         assert_eq!(
             buf.make_executable()?.exec(),
             object::encode_char('a') as i32
@@ -328,10 +371,10 @@ mod tests {
         compiler.compile_function(&node)?;
         // mov rax, imm('a'); shr rax, 6; ret
         let expected = &[
-            0x48, 0xc7, 0xc0, 0x0f, 0x61, 0x00, 0x00, 0x48, 0xc1, 0xe8, 0x06, 0xc3,
+            0x48, 0xc7, 0xc0, 0x0f, 0x61, 0x00, 0x00, 0x48, 0xc1, 0xe8, 0x06,
         ];
         let buf = compiler.finish();
-        assert_eq!(expected, buf.code());
+        assert_function_contents(buf.code(), expected);
         assert_eq!(
             buf.make_executable()?.exec(),
             object::encode_integer(97)? as i32
@@ -350,10 +393,10 @@ mod tests {
         // mov rax, imm(123); add rax, imm(1); add rax, imm(1); ret
         let expected = &[
             0x48, 0xc7, 0xc0, 0xec, 0x01, 0x00, 0x00, 0x48, 0x05, 0x04, 0x00, 0x00, 0x00, 0x48,
-            0x05, 0x04, 0x00, 0x00, 0x00, 0xc3,
+            0x05, 0x04, 0x00, 0x00, 0x00,
         ];
         let buf = compiler.finish();
-        assert_eq!(expected, buf.code());
+        assert_function_contents(buf.code(), expected);
         assert_eq!(
             buf.make_executable()?.exec(),
             object::encode_integer(125)? as i32
@@ -376,10 +419,10 @@ mod tests {
         let expected = &[
             0x48, 0xc7, 0xc0, 0x2f, 0x00, 0x00, 0x00, 0x48, 0x3d, 0x2f, 0x00, 0x00, 0x00, 0x48,
             0xc7, 0xc0, 0x00, 0x00, 0x00, 0x00, 0x0f, 0x94, 0xc0, 0x48, 0xc1, 0xe0, 0x07, 0x48,
-            0x83, 0xc8, 0x1f, 0xc3,
+            0x83, 0xc8, 0x1f,
         ];
         let buf = compiler.finish();
-        assert_eq!(expected, buf.code());
+        assert_function_contents(buf.code(), expected);
         assert_eq!(
             buf.make_executable()?.exec(),
             object::encode_bool(true) as i32
@@ -402,10 +445,10 @@ mod tests {
         let expected = &[
             0x48, 0xc7, 0xc0, 0x14, 0x00, 0x00, 0x00, 0x48, 0x3d, 0x2f, 0x00, 0x00, 0x00, 0x48,
             0xc7, 0xc0, 0x00, 0x00, 0x00, 0x00, 0x0f, 0x94, 0xc0, 0x48, 0xc1, 0xe0, 0x07, 0x48,
-            0x83, 0xc8, 0x1f, 0xc3,
+            0x83, 0xc8, 0x1f,
         ];
         let buf = compiler.finish();
-        assert_eq!(expected, buf.code());
+        assert_function_contents(buf.code(), expected);
         assert_eq!(
             buf.make_executable()?.exec(),
             object::encode_bool(false) as i32
@@ -428,10 +471,10 @@ mod tests {
         let expected = &[
             0x48, 0xc7, 0xc0, 0x00, 0x00, 0x00, 0x00, 0x48, 0x3d, 0x00, 0x00, 0x00, 0x00, 0x48,
             0xc7, 0xc0, 0x00, 0x00, 0x00, 0x00, 0x0f, 0x94, 0xc0, 0x48, 0xc1, 0xe0, 0x07, 0x48,
-            0x83, 0xc8, 0x1f, 0xc3,
+            0x83, 0xc8, 0x1f,
         ];
         let buf = compiler.finish();
-        assert_eq!(expected, buf.code());
+        assert_function_contents(buf.code(), expected);
         assert_eq!(
             buf.make_executable()?.exec(),
             object::encode_bool(true) as i32
@@ -454,10 +497,10 @@ mod tests {
         let expected = &[
             0x48, 0xc7, 0xc0, 0x14, 0x00, 0x00, 0x00, 0x48, 0x3d, 0x00, 0x00, 0x00, 0x00, 0x48,
             0xc7, 0xc0, 0x00, 0x00, 0x00, 0x00, 0x0f, 0x94, 0xc0, 0x48, 0xc1, 0xe0, 0x07, 0x48,
-            0x83, 0xc8, 0x1f, 0xc3,
+            0x83, 0xc8, 0x1f,
         ];
         let buf = compiler.finish();
-        assert_eq!(expected, buf.code());
+        assert_function_contents(buf.code(), expected);
         assert_eq!(
             buf.make_executable()?.exec(),
             object::encode_bool(false) as i32
@@ -480,10 +523,10 @@ mod tests {
         let expected = &[
             0x48, 0xc7, 0xc0, 0x1f, 0x00, 0x00, 0x00, 0x48, 0x3d, 0x1f, 0x00, 0x00, 0x00, 0x48,
             0xc7, 0xc0, 0x00, 0x00, 0x00, 0x00, 0x0f, 0x94, 0xc0, 0x48, 0xc1, 0xe0, 0x07, 0x48,
-            0x83, 0xc8, 0x1f, 0xc3,
+            0x83, 0xc8, 0x1f,
         ];
         let buf = compiler.finish();
-        assert_eq!(expected, buf.code());
+        assert_function_contents(buf.code(), expected);
         assert_eq!(
             buf.make_executable()?.exec(),
             object::encode_bool(true) as i32
@@ -506,10 +549,10 @@ mod tests {
         let expected = &[
             0x48, 0xc7, 0xc0, 0x14, 0x00, 0x00, 0x00, 0x48, 0x3d, 0x1f, 0x00, 0x00, 0x00, 0x48,
             0xc7, 0xc0, 0x00, 0x00, 0x00, 0x00, 0x0f, 0x94, 0xc0, 0x48, 0xc1, 0xe0, 0x07, 0x48,
-            0x83, 0xc8, 0x1f, 0xc3,
+            0x83, 0xc8, 0x1f,
         ];
         let buf = compiler.finish();
-        assert_eq!(expected, buf.code());
+        assert_function_contents(buf.code(), expected);
         assert_eq!(
             buf.make_executable()?.exec(),
             object::encode_bool(false) as i32
@@ -533,10 +576,10 @@ mod tests {
         let expected: &[u8] = &[
             0x48, 0xc7, 0xc0, 0x14, 0x00, 0x00, 0x00, 0x48, 0x83, 0xe0, 0x03, 0x48, 0x3d, 0x00,
             0x00, 0x00, 0x00, 0x48, 0xc7, 0xc0, 0x00, 0x00, 0x00, 0x00, 0x0f, 0x94, 0xc0, 0x48,
-            0xc1, 0xe0, 0x07, 0x48, 0x83, 0xc8, 0x1f, 0xc3,
+            0xc1, 0xe0, 0x07, 0x48, 0x83, 0xc8, 0x1f,
         ];
         let buf = compiler.finish();
-        assert_eq!(expected, buf.code());
+        assert_function_contents(buf.code(), expected);
         assert_eq!(
             buf.make_executable()?.exec(),
             object::encode_bool(true) as i32
@@ -560,10 +603,10 @@ mod tests {
         let expected: &[u8] = &[
             0x48, 0xc7, 0xc0, 0x2f, 0x00, 0x00, 0x00, 0x48, 0x83, 0xe0, 0x03, 0x48, 0x3d, 0x00,
             0x00, 0x00, 0x00, 0x48, 0xc7, 0xc0, 0x00, 0x00, 0x00, 0x00, 0x0f, 0x94, 0xc0, 0x48,
-            0xc1, 0xe0, 0x07, 0x48, 0x83, 0xc8, 0x1f, 0xc3,
+            0xc1, 0xe0, 0x07, 0x48, 0x83, 0xc8, 0x1f,
         ];
         let buf = compiler.finish();
-        assert_eq!(expected, buf.code());
+        assert_function_contents(buf.code(), expected);
         assert_eq!(
             buf.make_executable()?.exec(),
             object::encode_bool(false) as i32
@@ -587,10 +630,10 @@ mod tests {
         let expected: &[u8] = &[
             0x48, 0xc7, 0xc0, 0x9f, 0x00, 0x00, 0x00, 0x48, 0x83, 0xe0, 0x3f, 0x48, 0x3d, 0x1f,
             0x00, 0x00, 0x00, 0x48, 0xc7, 0xc0, 0x00, 0x00, 0x00, 0x00, 0x0f, 0x94, 0xc0, 0x48,
-            0xc1, 0xe0, 0x07, 0x48, 0x83, 0xc8, 0x1f, 0xc3,
+            0xc1, 0xe0, 0x07, 0x48, 0x83, 0xc8, 0x1f,
         ];
         let buf = compiler.finish();
-        assert_eq!(expected, buf.code());
+        assert_function_contents(buf.code(), expected);
         assert_eq!(
             buf.make_executable()?.exec(),
             object::encode_bool(true) as i32
@@ -614,10 +657,237 @@ mod tests {
         let expected: &[u8] = &[
             0x48, 0xc7, 0xc0, 0x14, 0x00, 0x00, 0x00, 0x48, 0x83, 0xe0, 0x3f, 0x48, 0x3d, 0x1f,
             0x00, 0x00, 0x00, 0x48, 0xc7, 0xc0, 0x00, 0x00, 0x00, 0x00, 0x0f, 0x94, 0xc0, 0x48,
-            0xc1, 0xe0, 0x07, 0x48, 0x83, 0xc8, 0x1f, 0xc3,
+            0xc1, 0xe0, 0x07, 0x48, 0x83, 0xc8, 0x1f,
         ];
         let buf = compiler.finish();
-        assert_eq!(expected, buf.code());
+        assert_function_contents(buf.code(), expected);
+        assert_eq!(
+            buf.make_executable()?.exec(),
+            object::encode_bool(false) as i32
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn compile_binary_plus() -> Result {
+        let node =
+            ASTNode::new_binary_call("+".to_string(), ASTNode::Integer(5), ASTNode::Integer(8));
+        let mut compiler = Compiler::new(Emit::new(Buffer::new(10)?));
+        compiler.compile_function(&node)?;
+
+        let expected: &[u8] = &[
+            // 0:  48 c7 c0 20 00 00 00    mov    rax,0x20
+            0x48, 0xc7, 0xc0, 0x20, 0x00, 0x00, 0x00,
+            // 7:  48 89 45 f8             mov    QWORD PTR [rbp-0x8],rax
+            0x48, 0x89, 0x45, 0xf8, // b:  48 c7 c0 14 00 00 00    mov    rax,0x14
+            0x48, 0xc7, 0xc0, 0x14, 0x00, 0x00, 0x00,
+            // 12: 48 03 45 f8             add    rax,QWORD PTR [rbp-0x8]
+            0x48, 0x03, 0x45, 0xf8,
+        ];
+        let buf = compiler.finish();
+        assert_function_contents(buf.code(), expected);
+        assert_eq!(
+            buf.make_executable()?.exec(),
+            object::encode_integer(13)? as i32
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn compile_binary_plus_nested() -> Result {
+        let node = ASTNode::new_binary_call(
+            "+".to_string(),
+            ASTNode::new_binary_call("+".to_string(), ASTNode::Integer(1), ASTNode::Integer(2)),
+            ASTNode::new_binary_call("+".to_string(), ASTNode::Integer(3), ASTNode::Integer(4)),
+        );
+        let mut compiler = Compiler::new(Emit::new(Buffer::new(10)?));
+        compiler.compile_function(&node)?;
+
+        let expected: &[u8] = &[
+            // 4:  48 c7 c0 10 00 00 00    mov    rax,0x10
+            0x48, 0xc7, 0xc0, 0x10, 0x00, 0x00, 0x00,
+            // b:  48 89 45 f8             mov    QWORD PTR [rbp-0x8],rax
+            0x48, 0x89, 0x45, 0xf8, // f:  48 c7 c0 0c 00 00 00    mov    rax,0xc
+            0x48, 0xc7, 0xc0, 0x0c, 0x00, 0x00, 0x00,
+            // 16: 48 03 45 f8             add    rax,QWORD PTR [rbp-0x8]
+            0x48, 0x03, 0x45, 0xf8,
+            // 1a: 48 89 45 f8             mov    QWORD PTR [rbp-0x8],rax
+            0x48, 0x89, 0x45, 0xf8, // 1e: 48 c7 c0 08 00 00 00    mov    rax,0x8
+            0x48, 0xc7, 0xc0, 0x08, 0x00, 0x00, 0x00,
+            // 25: 48 89 45 f0             mov    QWORD PTR [rbp-0x10],rax
+            0x48, 0x89, 0x45, 0xf0, // 29: 48 c7 c0 04 00 00 00    mov    rax,0x4
+            0x48, 0xc7, 0xc0, 0x04, 0x00, 0x00, 0x00,
+            // 30: 48 03 45 f0             add    rax,QWORD PTR [rbp-0x10]
+            0x48, 0x03, 0x45, 0xf0,
+            // 34: 48 03 45 f8             add    rax,QWORD PTR [rbp-0x8]
+            0x48, 0x03, 0x45, 0xf8,
+        ];
+        let buf = compiler.finish();
+        assert_function_contents(buf.code(), expected);
+        assert_eq!(
+            buf.make_executable()?.exec(),
+            object::encode_integer(10)? as i32
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn compile_binary_minus() -> Result {
+        let node =
+            ASTNode::new_binary_call("-".to_string(), ASTNode::Integer(5), ASTNode::Integer(8));
+        let mut compiler = Compiler::new(Emit::new(Buffer::new(10)?));
+        compiler.compile_function(&node)?;
+
+        let expected: &[u8] = &[
+            // 0:  48 c7 c0 20 00 00 00    mov    rax,0x20
+            0x48, 0xc7, 0xc0, 0x20, 0x00, 0x00, 0x00,
+            // 7:  48 89 45 f8             mov    QWORD PTR [rbp-0x8],rax
+            0x48, 0x89, 0x45, 0xf8, // b:  48 c7 c0 14 00 00 00    mov    rax,0x14
+            0x48, 0xc7, 0xc0, 0x14, 0x00, 0x00, 0x00,
+            // 12: 48 2b 45 f8             add    rax,QWORD PTR [rbp-0x8]
+            0x48, 0x2b, 0x45, 0xf8,
+        ];
+        let buf = compiler.finish();
+        assert_function_contents(buf.code(), expected);
+        assert_eq!(
+            buf.make_executable()?.exec(),
+            object::encode_integer(-3)? as i32
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn compile_binary_minus_nested() -> Result {
+        let node = ASTNode::new_binary_call(
+            "-".to_string(),
+            ASTNode::new_binary_call("-".to_string(), ASTNode::Integer(5), ASTNode::Integer(1)),
+            ASTNode::new_binary_call("-".to_string(), ASTNode::Integer(4), ASTNode::Integer(3)),
+        );
+        let mut compiler = Compiler::new(Emit::new(Buffer::new(10)?));
+        compiler.compile_function(&node)?;
+
+        let expected: &[u8] = &[
+            // 4:  48 c7 c0 0c 00 00 00    mov    rax,0xc
+            0x48, 0xc7, 0xc0, 0x0c, 0x00, 0x00, 0x00,
+            // b:  48 89 45 f8             mov    QWORD PTR [rbp-0x8],rax
+            0x48, 0x89, 0x45, 0xf8, // f:  48 c7 c0 10 00 00 00    mov    rax,0x10
+            0x48, 0xc7, 0xc0, 0x10, 0x00, 0x00, 0x00,
+            // 16: 48 2b 45 f8             add    rax,QWORD PTR [rbp-0x8]
+            0x48, 0x2b, 0x45, 0xf8,
+            // 1a: 48 89 45 f8             mov    QWORD PTR [rbp-0x8],rax
+            0x48, 0x89, 0x45, 0xf8, // 1e: 48 c7 c0 04 00 00 00    mov    rax,0x4
+            0x48, 0xc7, 0xc0, 0x04, 0x00, 0x00, 0x00,
+            // 25: 48 89 45 f0             mov    QWORD PTR [rbp-0x10],rax
+            0x48, 0x89, 0x45, 0xf0, // 29: 48 c7 c0 14 00 00 00    mov    rax,0x14
+            0x48, 0xc7, 0xc0, 0x14, 0x00, 0x00, 0x00,
+            // 30: 48 2b 45 f0             add    rax,QWORD PTR [rbp-0x10]
+            0x48, 0x2b, 0x45, 0xf0,
+            // 34: 48 2b 45 f8             add    rax,QWORD PTR [rbp-0x8]
+            0x48, 0x2b, 0x45, 0xf8,
+        ];
+        let buf = compiler.finish();
+        assert_function_contents(buf.code(), expected);
+        assert_eq!(
+            buf.make_executable()?.exec(),
+            object::encode_integer(3)? as i32
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn compile_binary_mul() -> Result {
+        let node =
+            ASTNode::new_binary_call("*".to_string(), ASTNode::Integer(5), ASTNode::Integer(8));
+        let mut compiler = Compiler::new(Emit::new(Buffer::new(10)?));
+        compiler.compile_function(&node)?;
+        let buf = compiler.finish();
+        assert_eq!(
+            buf.make_executable()?.exec(),
+            object::encode_integer(40)? as i32
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn compile_binary_mul_nested() -> Result {
+        let node = ASTNode::new_binary_call(
+            "*".to_string(),
+            ASTNode::new_binary_call("*".to_string(), ASTNode::Integer(1), ASTNode::Integer(2)),
+            ASTNode::new_binary_call("*".to_string(), ASTNode::Integer(3), ASTNode::Integer(4)),
+        );
+        let mut compiler = Compiler::new(Emit::new(Buffer::new(10)?));
+        compiler.compile_function(&node)?;
+        let buf = compiler.finish();
+        assert_eq!(
+            buf.make_executable()?.exec(),
+            object::encode_integer(24)? as i32
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn compile_binary_eq_with_same_address_returns_true() -> Result {
+        let node =
+            ASTNode::new_binary_call("=".to_string(), ASTNode::Integer(5), ASTNode::Integer(5));
+        let mut compiler = Compiler::new(Emit::new(Buffer::new(10)?));
+        compiler.compile_function(&node)?;
+        let buf = compiler.finish();
+        assert_eq!(
+            buf.make_executable()?.exec(),
+            object::encode_bool(true) as i32
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn compile_binary_eq_with_different_address_returns_false() -> Result {
+        let node =
+            ASTNode::new_binary_call("=".to_string(), ASTNode::Integer(5), ASTNode::Integer(4));
+        let mut compiler = Compiler::new(Emit::new(Buffer::new(10)?));
+        compiler.compile_function(&node)?;
+        let buf = compiler.finish();
+        assert_eq!(
+            buf.make_executable()?.exec(),
+            object::encode_bool(false) as i32
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn compile_binary_lt_with_left_less_than_right_returns_true() -> Result {
+        let node =
+            ASTNode::new_binary_call("<".to_string(), ASTNode::Integer(-5), ASTNode::Integer(5));
+        let mut compiler = Compiler::new(Emit::new(Buffer::new(10)?));
+        compiler.compile_function(&node)?;
+        let buf = compiler.finish();
+        assert_eq!(
+            buf.make_executable()?.exec(),
+            object::encode_bool(true) as i32
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn compile_binary_lt_with_left_equal_to_right_returns_false() -> Result {
+        let node =
+            ASTNode::new_binary_call("<".to_string(), ASTNode::Integer(5), ASTNode::Integer(5));
+        let mut compiler = Compiler::new(Emit::new(Buffer::new(10)?));
+        compiler.compile_function(&node)?;
+        let buf = compiler.finish();
+        assert_eq!(
+            buf.make_executable()?.exec(),
+            object::encode_bool(false) as i32
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn compile_binary_lt_with_left_greater_than_right_returns_false() -> Result {
+        let node =
+            ASTNode::new_binary_call("<".to_string(), ASTNode::Integer(6), ASTNode::Integer(5));
+        let mut compiler = Compiler::new(Emit::new(Buffer::new(10)?));
+        compiler.compile_function(&node)?;
+        let buf = compiler.finish();
         assert_eq!(
             buf.make_executable()?.exec(),
             object::encode_bool(false) as i32

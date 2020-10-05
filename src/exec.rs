@@ -8,9 +8,7 @@ impl Exec {
     }
 
     pub(crate) fn exec(&self) -> i32 {
-        let func: extern "C" fn() -> i32 = unsafe {
-            std::mem::transmute(self.0.as_ptr())
-        };
+        let func: extern "C" fn() -> i32 = unsafe { std::mem::transmute(self.0.as_ptr()) };
         func()
     }
 }

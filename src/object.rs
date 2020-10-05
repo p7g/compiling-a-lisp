@@ -1,6 +1,7 @@
 pub(crate) type Word = i64;
 pub(crate) type Uword = u64;
-pub(crate) const BITS_PER_WORD: usize = 8 * std::mem::size_of::<Word>();
+pub(crate) const WORD_SIZE: usize = std::mem::size_of::<Word>();
+pub(crate) const BITS_PER_WORD: usize = 8 * WORD_SIZE;
 
 pub(crate) const INTEGER_TAG: usize = 0;
 pub(crate) const INTEGER_TAG_MASK: usize = 3;
