@@ -27,6 +27,7 @@ pub(crate) enum Register {
     RDI,
 }
 
+#[derive(Clone, Copy)]
 #[repr(u8)]
 pub(crate) enum RegisterPiece {
     Al = 0,
@@ -39,6 +40,7 @@ pub(crate) enum RegisterPiece {
     Bh,
 }
 
+#[derive(Clone, Copy)]
 pub(crate) enum Condition {
     Overflow,
     NotOverflow,
@@ -54,7 +56,7 @@ pub(crate) enum Condition {
 }
 
 impl Condition {
-    fn value(&self) -> u8 {
+    fn value(self) -> u8 {
         use Condition::*;
 
         match self {
@@ -68,6 +70,7 @@ impl Condition {
     }
 }
 
+#[derive(Clone, Copy)]
 pub(crate) struct Indirect(pub(crate) Register, pub(crate) isize);
 
 impl Indirect {

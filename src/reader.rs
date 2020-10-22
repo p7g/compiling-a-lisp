@@ -17,6 +17,8 @@ impl std::fmt::Display for ReaderError {
 impl std::error::Error for ReaderError {}
 
 pub(crate) type Result = std::result::Result<ASTNode, ReaderError>;
+
+#[derive(Clone, Copy)]
 enum Sign {
     Positive,
     Negative,
@@ -49,6 +51,7 @@ impl<'a> Reader<'a> {
     }
 
     fn peek(&mut self) -> Option<&char> {
+        #[allow(clippy::or_fun_call)]
         self.unpeeked.as_ref().or(self.input.peek())
     }
 
@@ -66,7 +69,7 @@ impl<'a> Reader<'a> {
             c @ '+' | c @ '-'
                 if self
                     .peek()
-                    .map(|c| c.is_ascii_digit())
+                    .map(char::is_ascii_digit)
                     .ok_or(ReaderError::UnexpectedEndOfInput)? =>
             {
                 self.read_integer(if c == '+' {
@@ -113,7 +116,7 @@ impl<'a> Reader<'a> {
             result *= 10;
             result += c
                 .to_digit(10)
-                .map(|i| i as i64)
+                .map(i64::from)
                 .ok_or_else(|| ReaderError::UnexpectedInput(c))?;
         }
         Ok(ASTNode::Integer(match sign {

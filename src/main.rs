@@ -20,7 +20,7 @@ fn repl() -> Result<(), std::io::Error> {
             compile::Compiler::new(emit::Emit::new(
                 buffer::Buffer::new(10).expect("Failed to allocate buffer"),
             ))
-        }}
+        }};
     }
 
     print!("lisp> ");
@@ -37,7 +37,8 @@ fn repl() -> Result<(), std::io::Error> {
             } else {
                 println!(
                     "{}",
-                    cmp.finish().code()
+                    cmp.finish()
+                        .code()
                         .iter()
                         .map(|i| format!("{:02x}", i))
                         .collect::<Vec<_>>()
@@ -50,7 +51,10 @@ fn repl() -> Result<(), std::io::Error> {
             } else {
                 match cmp.finish().make_executable() {
                     // FIXME: always prints result as a number
-                    Ok(exec) => println!("Result: {}", object::decode_integer(exec.exec() as object::Word)),
+                    Ok(exec) => println!(
+                        "Result: {}",
+                        object::decode_integer(object::Word::from(exec.exec()))
+                    ),
                     Err(e) => println!("Failed to make executable: {}", e),
                 }
             }

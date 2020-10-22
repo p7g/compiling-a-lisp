@@ -47,7 +47,7 @@ impl Buffer {
 
     pub(crate) fn write_32(&mut self, value: i32) -> std::io::Result<()> {
         self.ensure_capacity(4)?;
-        for b in value.to_le_bytes().iter() {
+        for b in &value.to_le_bytes() {
             self.write_8(*b)?;
         }
         Ok(())
