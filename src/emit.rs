@@ -216,4 +216,11 @@ impl Emit {
         self.buf.write_8(0x40 + left as u8 * 8 + right.0 as u8)?;
         self.buf.write_8(right.offset())
     }
+
+    pub(crate) fn load_reg_indirect(&mut self, dst: Register, src: Indirect) -> Result {
+        self.buf.write_8(REX_PREFIX)?;
+        self.buf.write_8(0x8b)?;
+        self.buf.write_8(0x40 + dst as u8 * 8 + src.0 as u8)?;
+        self.buf.write_8(src.offset())
+    }
 }

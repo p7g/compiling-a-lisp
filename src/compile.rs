@@ -1,8 +1,9 @@
-use crate::ast::{ASTNode, Pair};
+use crate::ast::{ASTNode, Pair, Symbol};
 use crate::buffer::Buffer;
 use crate::emit::{
     Condition, Emit, Indirect, Register, RegisterPiece, FUNCTION_EPILOGUE, FUNCTION_PROLOGUE,
 };
+use crate::env::Env;
 use crate::object;
 use std::convert::TryInto;
 use std::num::TryFromIntError;
@@ -13,6 +14,8 @@ pub(crate) enum Error {
     ConversionError(TryFromIntError),
     IOError(std::io::Error),
     NotImplemented(String),
+    UnboundSymbol(Symbol),
+    SyntaxError(String),
 }
 
 macro_rules! impl_from_error {
@@ -51,7 +54,12 @@ impl Compiler {
         self.emit.finish()
     }
 
-    pub(crate) fn compile_expr(&mut self, node: &ASTNode, stack_index: isize) -> Result<(), Error> {
+    pub(crate) fn compile_expr(
+        &mut self,
+        node: &ASTNode,
+        stack_index: isize,
+        env: &mut Env,
+    ) -> Result<(), Error> {
         match node {
             ASTNode::Integer(w) => self
                 .emit
@@ -63,20 +71,35 @@ impl Compiler {
                 .emit
                 .mov_reg_imm32(Register::RAX, object::encode_bool(*b) as i32),
             ASTNode::Nil => self.emit.mov_reg_imm32(Register::RAX, object::nil() as i32),
-            ASTNode::Pair(p) => Ok(self.compile_call(&*p, stack_index)?),
-            _ => unimplemented!(),
+            ASTNode::Pair(p) => Ok(self.compile_call(&*p, stack_index, env)?),
+            ASTNode::Symbol(sym) => Ok(self.compile_symbol(sym, env)?),
         }?;
         Ok(())
     }
 
-    pub(crate) fn compile_function(&mut self, node: &ASTNode) -> Result<(), Error> {
+    fn compile_symbol(&mut self, sym: &Symbol, env: &mut Env) -> Result<(), Error> {
+        if let Some(value) = env.find(sym.name()) {
+            self.emit
+                .load_reg_indirect(Register::RAX, Indirect(Register::RBP, value as isize))?;
+            Ok(())
+        } else {
+            Err(Error::UnboundSymbol(sym.clone()))
+        }
+    }
+
+    pub(crate) fn compile_function(&mut self, node: &ASTNode, env: &Env) -> Result<(), Error> {
         self.emit.buf_mut().write_slice(FUNCTION_PROLOGUE)?;
-        self.compile_expr(node, -(object::WORD_SIZE as isize))?;
+        self.compile_expr(node, -(object::WORD_SIZE as isize), &mut env.extend())?;
         self.emit.buf_mut().write_slice(FUNCTION_EPILOGUE)?;
         Ok(())
     }
 
-    pub(crate) fn compile_call(&mut self, pair: &Pair, stack_index: isize) -> Result<(), Error> {
+    pub(crate) fn compile_call(
+        &mut self,
+        pair: &Pair,
+        stack_index: isize,
+        env: &mut Env,
+    ) -> Result<(), Error> {
         let Pair {
             car: callable,
             cdr: args,
@@ -88,7 +111,7 @@ impl Compiler {
                 cdr: ASTNode::Nil,
             } = p
             {
-                self.compile_expr(arg, stack_index)?;
+                self.compile_expr(arg, stack_index, env)?;
                 match sym.name() {
                     "add1" => self
                         .emit
@@ -136,10 +159,23 @@ impl Compiler {
                     cdr: ASTNode::Nil,
                 } = p
                 {
-                    self.compile_expr(b, stack_index)?;
+                    // Special cases
+                    match sym.name() {
+                        "let" => {
+                            return self.compile_let(
+                                a,
+                                b,
+                                stack_index,
+                                &mut env.extend(),
+                                &mut env.extend(),
+                            )
+                        }
+                        _ => (),
+                    }
+                    self.compile_expr(b, stack_index, env)?;
                     self.emit
                         .store_reg_indirect(Indirect(Register::RBP, stack_index), Register::RAX)?;
-                    self.compile_expr(a, stack_index - object::WORD_SIZE as isize)?;
+                    self.compile_expr(a, stack_index - object::WORD_SIZE as isize, env)?;
                     match sym.name() {
                         "+" => self.emit.add_reg_indirect(
                             Register::RAX,
@@ -186,6 +222,8 @@ impl Compiler {
                     }
 
                     Ok(())
+                } else if let ASTNode::Pair(..) = p.cdr {
+                    Err(Error::NotImplemented("arity > 2".to_string()))
                 } else {
                     unreachable!("Improper list in AST?");
                 }
@@ -209,11 +247,74 @@ impl Compiler {
             .or_reg_imm8(Register::RAX, object::BOOL_TAG as u8)?;
         Ok(())
     }
+
+    fn compile_let(
+        &mut self,
+        bindings: &ASTNode,
+        body: &ASTNode,
+        mut stack_index: isize,
+        binding_env: &mut Env,
+        body_env: &mut Env,
+    ) -> Result<(), Error> {
+        let syntax_error =
+            || Error::SyntaxError("let binding must be (name value) pair".to_string());
+
+        match bindings {
+            ASTNode::Nil => self.compile_expr(body, stack_index, body_env),
+            mut p @ ASTNode::Pair(..) => {
+                loop {
+                    let Pair {
+                        car: binding,
+                        cdr: bindings,
+                    }: &Pair = match p {
+                        ASTNode::Nil => break,
+                        ASTNode::Pair(p) => p,
+                        _ => return Err(syntax_error()),
+                    };
+                    p = bindings;
+
+                    let binding: &Pair = if let ASTNode::Pair(p) = binding {
+                        p
+                    } else {
+                        return Err(syntax_error());
+                    };
+                    if let Pair {
+                        car: ASTNode::Symbol(sym),
+                        cdr: ASTNode::Pair(binding_expr_list),
+                    } = binding
+                    {
+                        let binding_expr_list: &Pair = binding_expr_list;
+                        if let Pair {
+                            car: binding_expr,
+                            cdr: ASTNode::Nil,
+                        } = binding_expr_list
+                        {
+                            self.compile_expr(binding_expr, stack_index, binding_env)?;
+                            self.emit.store_reg_indirect(
+                                Indirect(Register::RBP, stack_index),
+                                Register::RAX,
+                            )?;
+                            body_env.bind(sym.name().to_string(), stack_index as object::Word);
+                            stack_index -= object::WORD_SIZE as isize;
+                        } else {
+                            return Err(syntax_error());
+                        }
+                    } else {
+                        return Err(syntax_error());
+                    }
+                }
+
+                self.compile_expr(body, stack_index, body_env)
+            }
+            _ => Err(syntax_error()),
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::reader::read;
 
     type Result = std::result::Result<(), Box<dyn std::error::Error>>;
 
@@ -231,7 +332,7 @@ mod tests {
         let value: object::Word = 123;
         let node = ASTNode::Integer(value);
         let mut compiler = Compiler::new(Emit::new(Buffer::new(10)?));
-        compiler.compile_function(&node)?;
+        compiler.compile_function(&node, &mut Env::new())?;
         let buf = compiler.finish();
         let expected = &[0x48, 0xc7, 0xc0, 0xec, 0x01, 0x00, 0x00];
         assert_function_contents(buf.code(), expected);
@@ -247,7 +348,7 @@ mod tests {
         let value: object::Word = -123;
         let node = ASTNode::Integer(value);
         let mut compiler = Compiler::new(Emit::new(Buffer::new(10)?));
-        compiler.compile_function(&node)?;
+        compiler.compile_function(&node, &mut Env::new())?;
         let buf = compiler.finish();
         let expected = &[0x48, 0xc7, 0xc0, 0x14, 0xfe, 0xff, 0xff];
         assert_function_contents(buf.code(), expected);
@@ -263,7 +364,7 @@ mod tests {
         let value = 'a';
         let node = ASTNode::Char(value);
         let mut compiler = Compiler::new(Emit::new(Buffer::new(10)?));
-        compiler.compile_function(&node)?;
+        compiler.compile_function(&node, &mut Env::new())?;
         let buf = compiler.finish();
         let expected = &[0x48, 0xc7, 0xc0, 0x0f, 0x61, 0x00, 0x00];
         assert_function_contents(buf.code(), expected);
@@ -279,7 +380,7 @@ mod tests {
         for value in &[true, false] {
             let node = ASTNode::Bool(*value);
             let mut compiler = Compiler::new(Emit::new(Buffer::new(10)?));
-            compiler.compile_function(&node)?;
+            compiler.compile_function(&node, &mut Env::new())?;
             let buf = compiler.finish();
             let expected = &[
                 0x48,
@@ -303,7 +404,7 @@ mod tests {
     fn compile_nil() -> Result {
         let node = ASTNode::Nil;
         let mut compiler = Compiler::new(Emit::new(Buffer::new(10)?));
-        compiler.compile_function(&node)?;
+        compiler.compile_function(&node, &mut Env::new())?;
         let buf = compiler.finish();
         let expected = &[0x48, 0xc7, 0xc0, 0x2f, 0x00, 0x00, 0x00];
         assert_function_contents(buf.code(), expected);
@@ -315,7 +416,7 @@ mod tests {
     fn compile_unary_add1() -> Result {
         let node = ASTNode::new_unary_call("add1".to_string(), ASTNode::Integer(123));
         let mut compiler = Compiler::new(Emit::new(Buffer::new(10)?));
-        compiler.compile_function(&node)?;
+        compiler.compile_function(&node, &mut Env::new())?;
         let expected = &[
             0x48, 0xc7, 0xc0, 0xec, 0x01, 0x00, 0x00, 0x48, 0x05, 0x04, 0x00, 0x00, 0x00,
         ];
@@ -332,7 +433,7 @@ mod tests {
     fn compile_unary_sub1() -> Result {
         let node = ASTNode::new_unary_call("sub1".to_string(), ASTNode::Integer(123));
         let mut compiler = Compiler::new(Emit::new(Buffer::new(10)?));
-        compiler.compile_function(&node)?;
+        compiler.compile_function(&node, &mut Env::new())?;
         // mov rax, imm(123); sub rax, imm(1); ret
         let expected = &[
             0x48, 0xc7, 0xc0, 0xec, 0x01, 0x00, 0x00, 0x48, 0x2d, 0x04, 0x00, 0x00, 0x00,
@@ -350,7 +451,7 @@ mod tests {
     fn compile_unary_integer_to_char() -> Result {
         let node = ASTNode::new_unary_call("integer->char".to_string(), ASTNode::Integer(97));
         let mut compiler = Compiler::new(Emit::new(Buffer::new(10)?));
-        compiler.compile_function(&node)?;
+        compiler.compile_function(&node, &mut Env::new())?;
         // mov rax, imm(97); shl rax, 6; or rax, 0xf, ret
         let expected = &[
             0x48, 0xc7, 0xc0, 0x84, 0x01, 0x00, 0x00, 0x48, 0xc1, 0xe0, 0x06, 0x48, 0x83, 0xc8, 0xf,
@@ -368,7 +469,7 @@ mod tests {
     fn compile_unary_char_to_integer() -> Result {
         let node = ASTNode::new_unary_call("char->integer".to_string(), ASTNode::Char('a'));
         let mut compiler = Compiler::new(Emit::new(Buffer::new(10)?));
-        compiler.compile_function(&node)?;
+        compiler.compile_function(&node, &mut Env::new())?;
         // mov rax, imm('a'); shr rax, 6; ret
         let expected = &[
             0x48, 0xc7, 0xc0, 0x0f, 0x61, 0x00, 0x00, 0x48, 0xc1, 0xe8, 0x06,
@@ -389,7 +490,7 @@ mod tests {
             ASTNode::new_unary_call("add1".to_string(), ASTNode::Integer(123)),
         );
         let mut compiler = Compiler::new(Emit::new(Buffer::new(10)?));
-        compiler.compile_function(&node)?;
+        compiler.compile_function(&node, &mut Env::new())?;
         // mov rax, imm(123); add rax, imm(1); add rax, imm(1); ret
         let expected = &[
             0x48, 0xc7, 0xc0, 0xec, 0x01, 0x00, 0x00, 0x48, 0x05, 0x04, 0x00, 0x00, 0x00, 0x48,
@@ -408,7 +509,7 @@ mod tests {
     fn compile_unary_nilp_with_nil_returns_true() -> Result {
         let node = ASTNode::new_unary_call("nil?".to_string(), ASTNode::Nil);
         let mut compiler = Compiler::new(Emit::new(Buffer::new(10)?));
-        compiler.compile_function(&node)?;
+        compiler.compile_function(&node, &mut Env::new())?;
 
         // 0:  48 c7 c0 2f 00 00 00    mov    rax,0x2f
         // 7:  48 3d 2f 00 00 00       cmp    rax,0x0000002f
@@ -434,7 +535,7 @@ mod tests {
     fn compile_unary_nilp_with_non_nil_returns_false() -> Result {
         let node = ASTNode::new_unary_call("nil?".to_string(), ASTNode::Integer(5));
         let mut compiler = Compiler::new(Emit::new(Buffer::new(10)?));
-        compiler.compile_function(&node)?;
+        compiler.compile_function(&node, &mut Env::new())?;
 
         // 0:  48 c7 c0 14 00 00 00    mov    rax,0x14
         // 7:  48 3d 2f 00 00 00       cmp    rax,0x0000002f
@@ -460,7 +561,7 @@ mod tests {
     fn compile_unary_zerop_with_zero_returns_true() -> Result {
         let node = ASTNode::new_unary_call("zero?".to_string(), ASTNode::Integer(0));
         let mut compiler = Compiler::new(Emit::new(Buffer::new(10)?));
-        compiler.compile_function(&node)?;
+        compiler.compile_function(&node, &mut Env::new())?;
 
         // 0:  48 c7 c0 00 00 00 00    mov    rax,0x0
         // 7:  48 3d 00 00 00 00       cmp    rax,0x00000000
@@ -486,7 +587,7 @@ mod tests {
     fn compile_unary_zerop_with_non_zero_returns_false() -> Result {
         let node = ASTNode::new_unary_call("zero?".to_string(), ASTNode::Integer(5));
         let mut compiler = Compiler::new(Emit::new(Buffer::new(10)?));
-        compiler.compile_function(&node)?;
+        compiler.compile_function(&node, &mut Env::new())?;
 
         // 0:  48 c7 c0 14 00 00 00    mov    rax,0x14
         // 7:  48 3d 00 00 00 00       cmp    rax,0x00000000
@@ -512,7 +613,7 @@ mod tests {
     fn compile_unary_not_with_false_returns_true() -> Result {
         let node = ASTNode::new_unary_call("not".to_string(), ASTNode::Bool(false));
         let mut compiler = Compiler::new(Emit::new(Buffer::new(10)?));
-        compiler.compile_function(&node)?;
+        compiler.compile_function(&node, &mut Env::new())?;
 
         // 0:  48 c7 c0 1f 00 00 00    mov    rax,0x1f
         // 7:  48 3d 1f 00 00 00       cmp    rax,0x0000001f
@@ -538,7 +639,7 @@ mod tests {
     fn compile_unary_not_with_non_false_returns_false() -> Result {
         let node = ASTNode::new_unary_call("not".to_string(), ASTNode::Integer(5));
         let mut compiler = Compiler::new(Emit::new(Buffer::new(10)?));
-        compiler.compile_function(&node)?;
+        compiler.compile_function(&node, &mut Env::new())?;
 
         // 0:  48 c7 c0 14 00 00 00    mov    rax,0x14
         // 7:  48 3d 1f 00 00 00       cmp    rax,0x0000001f
@@ -564,7 +665,7 @@ mod tests {
     fn compile_unary_integerp_with_integer_returns_true() -> Result {
         let node = ASTNode::new_unary_call("integer?".to_string(), ASTNode::Integer(5));
         let mut compiler = Compiler::new(Emit::new(Buffer::new(10)?));
-        compiler.compile_function(&node)?;
+        compiler.compile_function(&node, &mut Env::new())?;
 
         // 0:  48 c7 c0 14 00 00 00    mov    rax,0x14
         // 7:  48 83 e0 03             and    rax,0x3
@@ -591,7 +692,7 @@ mod tests {
     fn compile_unary_integerp_with_non_integer_returns_false() -> Result {
         let node = ASTNode::new_unary_call("integer?".to_string(), ASTNode::Nil);
         let mut compiler = Compiler::new(Emit::new(Buffer::new(10)?));
-        compiler.compile_function(&node)?;
+        compiler.compile_function(&node, &mut Env::new())?;
 
         // 0:  48 c7 c0 2f 00 00 00    mov    rax,0x2f
         // 7:  48 83 e0 03             and    rax,0x3
@@ -618,7 +719,7 @@ mod tests {
     fn compile_unary_booleanp_with_boolean_returns_true() -> Result {
         let node = ASTNode::new_unary_call("boolean?".to_string(), ASTNode::Bool(true));
         let mut compiler = Compiler::new(Emit::new(Buffer::new(10)?));
-        compiler.compile_function(&node)?;
+        compiler.compile_function(&node, &mut Env::new())?;
 
         // 0:  48 c7 c0 9f 00 00 00    mov    rax,0x9f
         // 7:  48 83 e0 1f             and    rax,0x3f
@@ -645,7 +746,7 @@ mod tests {
     fn compile_unary_booleanp_with_non_boolean_returns_false() -> Result {
         let node = ASTNode::new_unary_call("boolean?".to_string(), ASTNode::Integer(5));
         let mut compiler = Compiler::new(Emit::new(Buffer::new(10)?));
-        compiler.compile_function(&node)?;
+        compiler.compile_function(&node, &mut Env::new())?;
 
         // 0:  48 c7 c0 14 00 00 00    mov    rax,0x14
         // 7:  48 83 e0 3f             and    rax,0x3f
@@ -673,7 +774,7 @@ mod tests {
         let node =
             ASTNode::new_binary_call("+".to_string(), ASTNode::Integer(5), ASTNode::Integer(8));
         let mut compiler = Compiler::new(Emit::new(Buffer::new(10)?));
-        compiler.compile_function(&node)?;
+        compiler.compile_function(&node, &mut Env::new())?;
 
         let expected: &[u8] = &[
             // 0:  48 c7 c0 20 00 00 00    mov    rax,0x20
@@ -701,7 +802,7 @@ mod tests {
             ASTNode::new_binary_call("+".to_string(), ASTNode::Integer(3), ASTNode::Integer(4)),
         );
         let mut compiler = Compiler::new(Emit::new(Buffer::new(10)?));
-        compiler.compile_function(&node)?;
+        compiler.compile_function(&node, &mut Env::new())?;
 
         let expected: &[u8] = &[
             // 4:  48 c7 c0 10 00 00 00    mov    rax,0x10
@@ -736,7 +837,7 @@ mod tests {
         let node =
             ASTNode::new_binary_call("-".to_string(), ASTNode::Integer(5), ASTNode::Integer(8));
         let mut compiler = Compiler::new(Emit::new(Buffer::new(10)?));
-        compiler.compile_function(&node)?;
+        compiler.compile_function(&node, &mut Env::new())?;
 
         let expected: &[u8] = &[
             // 0:  48 c7 c0 20 00 00 00    mov    rax,0x20
@@ -764,7 +865,7 @@ mod tests {
             ASTNode::new_binary_call("-".to_string(), ASTNode::Integer(4), ASTNode::Integer(3)),
         );
         let mut compiler = Compiler::new(Emit::new(Buffer::new(10)?));
-        compiler.compile_function(&node)?;
+        compiler.compile_function(&node, &mut Env::new())?;
 
         let expected: &[u8] = &[
             // 4:  48 c7 c0 0c 00 00 00    mov    rax,0xc
@@ -799,7 +900,7 @@ mod tests {
         let node =
             ASTNode::new_binary_call("*".to_string(), ASTNode::Integer(5), ASTNode::Integer(8));
         let mut compiler = Compiler::new(Emit::new(Buffer::new(10)?));
-        compiler.compile_function(&node)?;
+        compiler.compile_function(&node, &mut Env::new())?;
         let buf = compiler.finish();
         assert_eq!(
             buf.make_executable()?.exec(),
@@ -816,7 +917,7 @@ mod tests {
             ASTNode::new_binary_call("*".to_string(), ASTNode::Integer(3), ASTNode::Integer(4)),
         );
         let mut compiler = Compiler::new(Emit::new(Buffer::new(10)?));
-        compiler.compile_function(&node)?;
+        compiler.compile_function(&node, &mut Env::new())?;
         let buf = compiler.finish();
         assert_eq!(
             buf.make_executable()?.exec(),
@@ -830,7 +931,7 @@ mod tests {
         let node =
             ASTNode::new_binary_call("=".to_string(), ASTNode::Integer(5), ASTNode::Integer(5));
         let mut compiler = Compiler::new(Emit::new(Buffer::new(10)?));
-        compiler.compile_function(&node)?;
+        compiler.compile_function(&node, &mut Env::new())?;
         let buf = compiler.finish();
         assert_eq!(
             buf.make_executable()?.exec(),
@@ -844,7 +945,7 @@ mod tests {
         let node =
             ASTNode::new_binary_call("=".to_string(), ASTNode::Integer(5), ASTNode::Integer(4));
         let mut compiler = Compiler::new(Emit::new(Buffer::new(10)?));
-        compiler.compile_function(&node)?;
+        compiler.compile_function(&node, &mut Env::new())?;
         let buf = compiler.finish();
         assert_eq!(
             buf.make_executable()?.exec(),
@@ -858,7 +959,7 @@ mod tests {
         let node =
             ASTNode::new_binary_call("<".to_string(), ASTNode::Integer(-5), ASTNode::Integer(5));
         let mut compiler = Compiler::new(Emit::new(Buffer::new(10)?));
-        compiler.compile_function(&node)?;
+        compiler.compile_function(&node, &mut Env::new())?;
         let buf = compiler.finish();
         assert_eq!(
             buf.make_executable()?.exec(),
@@ -872,7 +973,7 @@ mod tests {
         let node =
             ASTNode::new_binary_call("<".to_string(), ASTNode::Integer(5), ASTNode::Integer(5));
         let mut compiler = Compiler::new(Emit::new(Buffer::new(10)?));
-        compiler.compile_function(&node)?;
+        compiler.compile_function(&node, &mut Env::new())?;
         let buf = compiler.finish();
         assert_eq!(
             buf.make_executable()?.exec(),
@@ -886,12 +987,74 @@ mod tests {
         let node =
             ASTNode::new_binary_call("<".to_string(), ASTNode::Integer(6), ASTNode::Integer(5));
         let mut compiler = Compiler::new(Emit::new(Buffer::new(10)?));
-        compiler.compile_function(&node)?;
+        compiler.compile_function(&node, &mut Env::new())?;
         let buf = compiler.finish();
         assert_eq!(
             buf.make_executable()?.exec(),
             object::encode_bool(false) as i32
         );
+        Ok(())
+    }
+
+    #[test]
+    fn compile_let_with_no_bindings() -> Result {
+        let node = read("(let () (+ 1 2))")?;
+        let mut compiler = Compiler::new(Emit::new(Buffer::new(10)?));
+        compiler.compile_function(&node, &mut Env::new())?;
+        assert_eq!(
+            object::decode_integer(compiler.finish().make_executable()?.exec().into()),
+            3
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn compile_let_with_one_binding() -> Result {
+        let node = read("(let ((a 1)) (+ a 2))")?;
+        let mut compiler = Compiler::new(Emit::new(Buffer::new(10)?));
+        compiler.compile_function(&node, &mut Env::new())?;
+        assert_eq!(
+            object::decode_integer(compiler.finish().make_executable()?.exec().into()),
+            3
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn compile_let_with_multiple_bindings() -> Result {
+        let node = read("(let ((a 1) (b 2)) (+ a b))")?;
+        let mut compiler = Compiler::new(Emit::new(Buffer::new(10)?));
+        compiler.compile_function(&node, &mut Env::new())?;
+        assert_eq!(
+            object::decode_integer(compiler.finish().make_executable()?.exec().into()),
+            3
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn compile_nested_let() -> Result {
+        let node = read("(let ((a 1)) (let ((b 2)) (+ a b)))")?;
+        let mut compiler = Compiler::new(Emit::new(Buffer::new(10)?));
+        compiler.compile_function(&node, &mut Env::new())?;
+        assert_eq!(
+            object::decode_integer(compiler.finish().make_executable()?.exec().into()),
+            3
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn compile_let_is_not_let_star() -> Result {
+        let node = read("(let ((a 1) (b a)) a)")?;
+        let mut compiler = Compiler::new(Emit::new(Buffer::new(10)?));
+        let res = compiler.compile_function(&node, &mut Env::new());
+        assert!(res.is_err());
+        if let Error::UnboundSymbol(sym) = res.as_ref().unwrap_err() {
+            assert_eq!(*sym, Symbol::new("a".to_string()));
+        } else {
+            res?;
+        }
         Ok(())
     }
 }
