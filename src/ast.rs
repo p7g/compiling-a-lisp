@@ -43,7 +43,7 @@ impl Pair {
     }
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub(crate) struct Symbol(String);
 
 impl Symbol {

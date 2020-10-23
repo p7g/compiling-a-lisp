@@ -1,7 +1,10 @@
+#![allow(dead_code)]
+
 mod ast;
 mod buffer;
 mod compile;
 mod emit;
+mod env;
 mod exec;
 mod object;
 mod reader;
@@ -32,7 +35,9 @@ fn repl() -> Result<(), std::io::Error> {
 
         if let Some(node) = node {
             let mut cmp = compiler!();
-            if let Err(e) = cmp.compile_expr(&node, -(object::WORD_SIZE as isize)) {
+            if let Err(e) =
+                cmp.compile_expr(&node, -(object::WORD_SIZE as isize), &mut env::Env::new())
+            {
                 println!("Compile error: {}", e);
             } else {
                 println!(
@@ -44,18 +49,18 @@ fn repl() -> Result<(), std::io::Error> {
                         .collect::<Vec<_>>()
                         .join(" ")
                 );
-            }
-            let mut cmp = compiler!();
-            if let Err(e) = cmp.compile_function(&node) {
-                println!("Compile error: {}", e);
-            } else {
-                match cmp.finish().make_executable() {
-                    // FIXME: always prints result as a number
-                    Ok(exec) => println!(
-                        "Result: {}",
-                        object::decode_integer(object::Word::from(exec.exec()))
-                    ),
-                    Err(e) => println!("Failed to make executable: {}", e),
+                let mut cmp = compiler!();
+                if let Err(e) = cmp.compile_function(&node, &mut env::Env::new()) {
+                    println!("Compile error: {}", e);
+                } else {
+                    match cmp.finish().make_executable() {
+                        // FIXME: always prints result as a number
+                        Ok(exec) => println!(
+                            "Result: {}",
+                            object::decode_integer(object::Word::from(exec.exec()))
+                        ),
+                        Err(e) => println!("Failed to make executable: {}", e),
+                    }
                 }
             }
         }
