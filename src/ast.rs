@@ -41,6 +41,23 @@ impl Pair {
     pub(crate) fn new(car: ASTNode, cdr: ASTNode) -> Self {
         Self { car, cdr }
     }
+
+    pub(crate) fn as_slice(&self) -> Vec<&ASTNode> {
+        let mut items = vec![&self.car];
+
+        let mut current = &self.cdr;
+        while let ASTNode::Pair(p) = current {
+            let Pair { car, cdr }: &Pair = &*p;
+            current = cdr;
+            items.push(car);
+        }
+
+        if *current != ASTNode::Nil {
+            unreachable!("Improper list passed to `Pair::as_slice`");
+        }
+
+        items
+    }
 }
 
 #[derive(Debug, PartialEq, Clone)]

@@ -30,7 +30,7 @@ pub(crate) fn read(input: &str) -> Result {
 }
 
 fn starts_symbol(c: char) -> bool {
-    "+-*>=?".contains(c) || c.is_ascii_alphabetic()
+    "+-*<>=?".contains(c) || c.is_ascii_alphabetic()
 }
 
 fn is_symbol_char(c: char) -> bool {

@@ -38,6 +38,12 @@ impl Buffer {
         self.mem[i]
     }
 
+    pub(crate) fn put_32(&mut self, i: usize, value: u32) {
+        for (offset, b) in value.to_le_bytes().iter().enumerate() {
+            self.mem[i + offset] = *b;
+        }
+    }
+
     pub(crate) fn write_8(&mut self, b: u8) -> std::io::Result<()> {
         self.ensure_capacity(1)?;
         self.mem[self.pos] = b;
