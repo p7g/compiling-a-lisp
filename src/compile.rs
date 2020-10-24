@@ -8,6 +8,8 @@ use crate::object;
 use std::convert::TryInto;
 use std::num::TryFromIntError;
 
+const LABEL_PLACEHOLDER: u32 = 0xdeadbeef;
+
 #[derive(Debug)]
 pub(crate) enum Error {
     ObjectError(object::Error),
@@ -80,7 +82,7 @@ impl Compiler {
     fn compile_symbol(&mut self, sym: &Symbol, env: &mut Env) -> Result<(), Error> {
         if let Some(value) = env.find(sym.name()) {
             self.emit
-                .load_reg_indirect(Register::RAX, Indirect(Register::RBP, value as isize))?;
+                .load_reg_indirect(Register::RAX, Indirect(Register::RBP, value as i8))?;
             Ok(())
         } else {
             Err(Error::UnboundSymbol(sym.clone()))
@@ -133,8 +135,10 @@ impl Compiler {
             (2, $body:tt) => {
                 _n_args!(2, {
                     self.compile_expr(args[1], stack_index, env)?;
-                    self.emit
-                        .store_reg_indirect(Indirect(Register::RBP, stack_index), Register::RAX)?;
+                    self.emit.store_reg_indirect(
+                        Indirect(Register::RBP, stack_index.try_into().unwrap()),
+                        Register::RAX,
+                    )?;
                     self.compile_expr(args[0], stack_index - object::WORD_SIZE as isize, env)?;
                     $body;
                 })
@@ -186,23 +190,29 @@ impl Compiler {
             }),
 
             "+" => n_args!(2, {
-                self.emit
-                    .add_reg_indirect(Register::RAX, Indirect(Register::RBP, stack_index))?;
+                self.emit.add_reg_indirect(
+                    Register::RAX,
+                    Indirect(Register::RBP, stack_index.try_into().unwrap()),
+                )?;
             }),
             "-" => n_args!(2, {
-                self.emit
-                    .sub_reg_indirect(Register::RAX, Indirect(Register::RBP, stack_index))?;
+                self.emit.sub_reg_indirect(
+                    Register::RAX,
+                    Indirect(Register::RBP, stack_index.try_into().unwrap()),
+                )?;
             }),
             "*" => n_args!(2, {
                 self.emit
-                    .mul_reg_indirect(Indirect(Register::RBP, stack_index))?;
+                    .mul_reg_indirect(Indirect(Register::RBP, stack_index.try_into().unwrap()))?;
                 // Remove the extra tag (which is now 0b0000)
                 self.emit
                     .shr_reg_imm8(Register::RAX, object::INTEGER_SHIFT as i8)?;
             }),
             "=" => n_args!(2, {
-                self.emit
-                    .cmp_reg_indirect(Register::RAX, Indirect(Register::RBP, stack_index))?;
+                self.emit.cmp_reg_indirect(
+                    Register::RAX,
+                    Indirect(Register::RBP, stack_index.try_into().unwrap()),
+                )?;
                 self.emit
                     .mov_reg_imm32(Register::RAX, object::encode_integer(0)? as i32)?;
                 self.emit.setcc_imm8(Condition::Equal, RegisterPiece::Al)?;
@@ -212,8 +222,10 @@ impl Compiler {
                     .or_reg_imm8(Register::RAX, object::BOOL_TAG as u8)?;
             }),
             "<" => n_args!(2, {
-                self.emit
-                    .cmp_reg_indirect(Register::RAX, Indirect(Register::RBP, stack_index))?;
+                self.emit.cmp_reg_indirect(
+                    Register::RAX,
+                    Indirect(Register::RBP, stack_index.try_into().unwrap()),
+                )?;
                 self.emit
                     .mov_reg_imm32(Register::RAX, object::encode_integer(0)? as i32)?;
                 self.emit.setcc_imm8(Condition::Less, RegisterPiece::Al)?;
@@ -222,7 +234,6 @@ impl Compiler {
                 self.emit
                     .or_reg_imm8(Register::RAX, object::BOOL_TAG as u8)?;
             }),
-
             "let" => _n_args!(2, {
                 self.compile_let(
                     args[0],
@@ -231,6 +242,10 @@ impl Compiler {
                     &mut env.extend(),
                     &mut env.extend(),
                 )?;
+            }),
+
+            "if" => _n_args!(3, {
+                self.compile_if(args[0], args[1], args[2], stack_index, env)?;
             }),
 
             _ => return Err(Error::NotImplemented(format!("Callable {}", callable))),
@@ -293,7 +308,7 @@ impl Compiler {
                         {
                             self.compile_expr(binding_expr, stack_index, binding_env)?;
                             self.emit.store_reg_indirect(
-                                Indirect(Register::RBP, stack_index),
+                                Indirect(Register::RBP, stack_index.try_into().unwrap()),
                                 Register::RAX,
                             )?;
                             body_env.bind(sym.name().to_string(), stack_index as object::Word);
@@ -310,6 +325,29 @@ impl Compiler {
             }
             _ => Err(syntax_error()),
         }
+    }
+
+    fn compile_if(
+        &mut self,
+        cond: &ASTNode,
+        consequent: &ASTNode,
+        alternate: &ASTNode,
+        stack_index: isize,
+        env: &mut Env,
+    ) -> Result<(), Error> {
+        self.compile_expr(cond, stack_index, env)?;
+        self.emit
+            .cmp_reg_imm32(Register::RAX, object::encode_bool(false) as i32)?;
+
+        let alternate_pos = self.emit.jcc(Condition::Equal, LABEL_PLACEHOLDER as i32)?;
+        self.compile_expr(consequent, stack_index, env)?;
+
+        let end_pos = self.emit.jmp(LABEL_PLACEHOLDER as i32)?;
+        self.emit.backpatch_imm32(alternate_pos);
+        self.compile_expr(alternate, stack_index, env)?;
+
+        self.emit.backpatch_imm32(end_pos);
+        Ok(())
     }
 }
 
@@ -1057,6 +1095,74 @@ mod tests {
         } else {
             res?;
         }
+        Ok(())
+    }
+
+    #[test]
+    fn compile_if_with_true_cond() -> Result {
+        let node = read("(if #t 1 2)")?;
+        let mut compiler = Compiler::new(Emit::new(Buffer::new(10)?));
+        compiler.compile_function(&node, &mut Env::new())?;
+
+        // mov rax, 0x9f
+        // cmp rax, 0x1f
+        // je alternate
+        // mov rax, compile(1)
+        // jmp end
+        // alternate:
+        // mov rax, compile(2)
+        // end:
+        let expected: &[u8] = &[
+            0x48, 0xc7, 0xc0, 0x9f, 0x00, 0x00, 0x00, 0x48, 0x3d, 0x1f, 0x00, 0x00, 0x00, 0x0f,
+            0x84, 0x0c, 0x00, 0x00, 0x00, 0x48, 0xc7, 0xc0, 0x04, 0x00, 0x00, 0x00, 0xe9, 0x07,
+            0x00, 0x00, 0x00, 0x48, 0xc7, 0xc0, 0x08, 0x00, 0x00, 0x00,
+        ];
+        let buf = compiler.finish();
+        assert_function_contents(buf.code(), expected);
+        assert_eq!(
+            buf.make_executable()?.exec(),
+            object::encode_integer(1)? as i32
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn compile_if_with_false_cond() -> Result {
+        let node = read("(if #f 1 2)")?;
+        let mut compiler = Compiler::new(Emit::new(Buffer::new(10)?));
+        compiler.compile_function(&node, &mut Env::new())?;
+
+        // mov rax, 0x1f
+        // cmp rax, 0x1f
+        // je alternate
+        // mov rax, compile(1)
+        // jmp end
+        // alternate:
+        // mov rax, compile(2)
+        // end:
+        let expected: &[u8] = &[
+            0x48, 0xc7, 0xc0, 0x1f, 0x00, 0x00, 0x00, 0x48, 0x3d, 0x1f, 0x00, 0x00, 0x00, 0x0f,
+            0x84, 0x0c, 0x00, 0x00, 0x00, 0x48, 0xc7, 0xc0, 0x04, 0x00, 0x00, 0x00, 0xe9, 0x07,
+            0x00, 0x00, 0x00, 0x48, 0xc7, 0xc0, 0x08, 0x00, 0x00, 0x00,
+        ];
+        let buf = compiler.finish();
+        assert_function_contents(buf.code(), expected);
+        assert_eq!(
+            buf.make_executable()?.exec(),
+            object::encode_integer(2)? as i32
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn compile_nested_if() -> Result {
+        let node = read("(if (< 1 2) (if #f 3 4) 5)")?;
+        let mut compiler = Compiler::new(Emit::new(Buffer::new(10)?));
+        compiler.compile_function(&node, &mut Env::new())?;
+        assert_eq!(
+            compiler.finish().make_executable()?.exec(),
+            object::encode_integer(4)? as i32
+        );
         Ok(())
     }
 }

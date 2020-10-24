@@ -70,15 +70,23 @@ impl Condition {
     }
 }
 
+fn disp32(disp: i32) -> u32 {
+    if disp >= 0 {
+        disp as u32
+    } else {
+        (0x100000000 + disp as i64) as u32
+    }
+}
+
 #[derive(Clone, Copy)]
-pub(crate) struct Indirect(pub(crate) Register, pub(crate) isize);
+pub(crate) struct Indirect(pub(crate) Register, pub(crate) i8);
 
 impl Indirect {
     fn offset(&self) -> u8 {
         if self.1 >= 0 {
             self.1 as u8
         } else {
-            (0x100 + self.1) as u8
+            (0x100 + self.1 as i16) as u8
         }
     }
 }
@@ -222,5 +230,26 @@ impl Emit {
         self.buf.write_8(0x8b)?;
         self.buf.write_8(0x40 + dst as u8 * 8 + src.0 as u8)?;
         self.buf.write_8(src.offset())
+    }
+
+    pub(crate) fn jcc(&mut self, cond: Condition, offset: i32) -> std::io::Result<i32> {
+        self.buf.write_8(0x0f)?;
+        self.buf.write_8(0x80 + cond.value())?;
+        let pos = self.buf.code().len();
+        self.buf.write_32(disp32(offset) as i32)?;
+        Ok(pos as i32)
+    }
+
+    pub(crate) fn jmp(&mut self, offset: i32) -> std::io::Result<i32> {
+        self.buf.write_8(0xe9)?;
+        let pos = self.buf.code().len();
+        self.buf.write_32(disp32(offset) as i32)?;
+        Ok(pos as i32)
+    }
+
+    pub(crate) fn backpatch_imm32(&mut self, target_pos: i32) {
+        let current_pos = self.buf.code().len() as i32;
+        let relative_pos = current_pos - target_pos - std::mem::size_of::<i32>() as i32;
+        self.buf.put_32(target_pos as usize, disp32(relative_pos));
     }
 }
