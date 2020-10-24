@@ -100,141 +100,143 @@ impl Compiler {
         stack_index: isize,
         env: &mut Env,
     ) -> Result<(), Error> {
-        let Pair {
-            car: callable,
-            cdr: args,
-        } = pair;
-        if let (ASTNode::Symbol(sym), ASTNode::Pair(p)) = (callable, args) {
-            let p: &Pair = p;
-            if let Pair {
-                car: arg,
-                cdr: ASTNode::Nil,
-            } = p
-            {
-                self.compile_expr(arg, stack_index, env)?;
-                match sym.name() {
-                    "add1" => self
-                        .emit
-                        .add_reg_imm32(Register::RAX, object::encode_integer(1)? as i32)?,
-                    "sub1" => self
-                        .emit
-                        .sub_reg_imm32(Register::RAX, object::encode_integer(1)? as i32)?,
-                    "integer->char" => {
-                        self.emit.shl_reg_imm8(
-                            Register::RAX,
-                            (object::CHAR_SHIFT - object::INTEGER_SHIFT) as i8,
-                        )?;
-                        self.emit
-                            .or_reg_imm8(Register::RAX, object::CHAR_TAG as u8)?;
-                    }
-                    "char->integer" => self.emit.shr_reg_imm8(
-                        Register::RAX,
-                        (object::CHAR_SHIFT - object::INTEGER_SHIFT) as i8,
-                    )?,
-                    "nil?" => self.compile_compare_imm32(object::nil() as i32)?,
-                    "zero?" => self.compile_compare_imm32(object::encode_integer(0)? as i32)?,
-                    "not" => self.compile_compare_imm32(object::encode_bool(false) as i32)?,
-                    "integer?" => {
-                        self.emit
-                            .and_reg_imm8(Register::RAX, object::INTEGER_TAG_MASK as u8)?;
-                        self.compile_compare_imm32(object::INTEGER_TAG as i32)?;
-                    }
-                    "boolean?" => {
-                        self.emit
-                            .and_reg_imm8(Register::RAX, object::IMMEDIATE_TAG_MASK as u8)?;
-                        self.compile_compare_imm32(object::BOOL_TAG as i32)?;
-                    }
-                    name => return Err(Error::NotImplemented(format!("unary {}", name))),
-                }
+        let items = pair.as_slice();
+        let (callable, args) = (items[0], &items[1..]);
 
-                Ok(())
-            } else if let Pair {
-                car: a,
-                cdr: ASTNode::Pair(p),
-            } = p
-            {
-                let p: &Pair = p;
-                if let Pair {
-                    car: b,
-                    cdr: ASTNode::Nil,
-                } = p
-                {
-                    // Special cases
-                    match sym.name() {
-                        "let" => {
-                            return self.compile_let(
-                                a,
-                                b,
-                                stack_index,
-                                &mut env.extend(),
-                                &mut env.extend(),
-                            )
-                        }
-                        _ => (),
-                    }
-                    self.compile_expr(b, stack_index, env)?;
+        let callable = if let ASTNode::Symbol(sym) = callable {
+            sym.name()
+        } else {
+            return Err(Error::NotImplemented("non-symbol functions".to_string()));
+        };
+
+        macro_rules! _n_args {
+            ($n:expr, $body:tt) => {
+                if args.len() != $n {
+                    return Err(Error::NotImplemented(format!(
+                        "Can't call {} with {} arguments",
+                        callable,
+                        args.len()
+                    )));
+                } else {
+                    $body;
+                }
+            };
+        }
+
+        macro_rules! n_args {
+            (1, $body:tt) => {
+                _n_args!(1, {
+                    self.compile_expr(args[0], stack_index, env)?;
+                    $body;
+                })
+            };
+            (2, $body:tt) => {
+                _n_args!(2, {
+                    self.compile_expr(args[1], stack_index, env)?;
                     self.emit
                         .store_reg_indirect(Indirect(Register::RBP, stack_index), Register::RAX)?;
-                    self.compile_expr(a, stack_index - object::WORD_SIZE as isize, env)?;
-                    match sym.name() {
-                        "+" => self.emit.add_reg_indirect(
-                            Register::RAX,
-                            Indirect(Register::RBP, stack_index),
-                        )?,
-                        "-" => self.emit.sub_reg_indirect(
-                            Register::RAX,
-                            Indirect(Register::RBP, stack_index),
-                        )?,
-                        "*" => {
-                            self.emit
-                                .mul_reg_indirect(Indirect(Register::RBP, stack_index))?;
-                            // Remove the extra tag (which is now 0b0000)
-                            self.emit
-                                .shr_reg_imm8(Register::RAX, object::INTEGER_SHIFT as i8)?;
-                        }
-                        "=" => {
-                            self.emit.cmp_reg_indirect(
-                                Register::RAX,
-                                Indirect(Register::RBP, stack_index),
-                            )?;
-                            self.emit
-                                .mov_reg_imm32(Register::RAX, object::encode_integer(0)? as i32)?;
-                            self.emit.setcc_imm8(Condition::Equal, RegisterPiece::Al)?;
-                            self.emit
-                                .shl_reg_imm8(Register::RAX, object::BOOL_SHIFT as i8)?;
-                            self.emit
-                                .or_reg_imm8(Register::RAX, object::BOOL_TAG as u8)?;
-                        }
-                        "<" => {
-                            self.emit.cmp_reg_indirect(
-                                Register::RAX,
-                                Indirect(Register::RBP, stack_index),
-                            )?;
-                            self.emit
-                                .mov_reg_imm32(Register::RAX, object::encode_integer(0)? as i32)?;
-                            self.emit.setcc_imm8(Condition::Less, RegisterPiece::Al)?;
-                            self.emit
-                                .shl_reg_imm8(Register::RAX, object::BOOL_SHIFT as i8)?;
-                            self.emit
-                                .or_reg_imm8(Register::RAX, object::BOOL_TAG as u8)?;
-                        }
-                        name => return Err(Error::NotImplemented(format!("binary {}", name))),
-                    }
-
-                    Ok(())
-                } else if let ASTNode::Pair(..) = p.cdr {
-                    Err(Error::NotImplemented("arity > 2".to_string()))
-                } else {
-                    unreachable!("Improper list in AST?");
-                }
-            } else {
-                Err(Error::NotImplemented(
-                    "non-unary/binary function calls".to_string(),
-                ))
-            }
-        } else {
-            Err(Error::NotImplemented("non-symbol functions".to_string()))
+                    self.compile_expr(args[0], stack_index - object::WORD_SIZE as isize, env)?;
+                    $body;
+                })
+            };
+            ($n:expr, $body:tt) => {
+                _n_args!($n, $body)
+            };
         }
+
+        match callable {
+            "add1" => n_args!(1, {
+                self.emit
+                    .add_reg_imm32(Register::RAX, object::encode_integer(1)? as i32)?;
+            }),
+            "sub1" => n_args!(1, {
+                self.emit
+                    .sub_reg_imm32(Register::RAX, object::encode_integer(1)? as i32)?;
+            }),
+            "integer->char" => n_args!(1, {
+                self.emit.shl_reg_imm8(
+                    Register::RAX,
+                    (object::CHAR_SHIFT - object::INTEGER_SHIFT) as i8,
+                )?;
+                self.emit
+                    .or_reg_imm8(Register::RAX, object::CHAR_TAG as u8)?;
+            }),
+            "char->integer" => n_args!(1, {
+                self.emit.shr_reg_imm8(
+                    Register::RAX,
+                    (object::CHAR_SHIFT - object::INTEGER_SHIFT) as i8,
+                )?;
+            }),
+            "nil?" => n_args!(1, { self.compile_compare_imm32(object::nil() as i32)? }),
+            "zero?" => n_args!(1, {
+                self.compile_compare_imm32(object::encode_integer(0)? as i32)?
+            }),
+            "not" => n_args!(1, {
+                self.compile_compare_imm32(object::encode_bool(false) as i32)?
+            }),
+            "integer?" => n_args!(1, {
+                self.emit
+                    .and_reg_imm8(Register::RAX, object::INTEGER_TAG_MASK as u8)?;
+                self.compile_compare_imm32(object::INTEGER_TAG as i32)?;
+            }),
+            "boolean?" => n_args!(1, {
+                self.emit
+                    .and_reg_imm8(Register::RAX, object::IMMEDIATE_TAG_MASK as u8)?;
+                self.compile_compare_imm32(object::BOOL_TAG as i32)?;
+            }),
+
+            "+" => n_args!(2, {
+                self.emit
+                    .add_reg_indirect(Register::RAX, Indirect(Register::RBP, stack_index))?;
+            }),
+            "-" => n_args!(2, {
+                self.emit
+                    .sub_reg_indirect(Register::RAX, Indirect(Register::RBP, stack_index))?;
+            }),
+            "*" => n_args!(2, {
+                self.emit
+                    .mul_reg_indirect(Indirect(Register::RBP, stack_index))?;
+                // Remove the extra tag (which is now 0b0000)
+                self.emit
+                    .shr_reg_imm8(Register::RAX, object::INTEGER_SHIFT as i8)?;
+            }),
+            "=" => n_args!(2, {
+                self.emit
+                    .cmp_reg_indirect(Register::RAX, Indirect(Register::RBP, stack_index))?;
+                self.emit
+                    .mov_reg_imm32(Register::RAX, object::encode_integer(0)? as i32)?;
+                self.emit.setcc_imm8(Condition::Equal, RegisterPiece::Al)?;
+                self.emit
+                    .shl_reg_imm8(Register::RAX, object::BOOL_SHIFT as i8)?;
+                self.emit
+                    .or_reg_imm8(Register::RAX, object::BOOL_TAG as u8)?;
+            }),
+            "<" => n_args!(2, {
+                self.emit
+                    .cmp_reg_indirect(Register::RAX, Indirect(Register::RBP, stack_index))?;
+                self.emit
+                    .mov_reg_imm32(Register::RAX, object::encode_integer(0)? as i32)?;
+                self.emit.setcc_imm8(Condition::Less, RegisterPiece::Al)?;
+                self.emit
+                    .shl_reg_imm8(Register::RAX, object::BOOL_SHIFT as i8)?;
+                self.emit
+                    .or_reg_imm8(Register::RAX, object::BOOL_TAG as u8)?;
+            }),
+
+            "let" => _n_args!(2, {
+                self.compile_let(
+                    args[0],
+                    args[1],
+                    stack_index,
+                    &mut env.extend(),
+                    &mut env.extend(),
+                )?;
+            }),
+
+            _ => return Err(Error::NotImplemented(format!("Callable {}", callable))),
+        }
+
+        Ok(())
     }
 
     fn compile_compare_imm32(&mut self, value: i32) -> Result<(), Error> {
