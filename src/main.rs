@@ -53,12 +53,9 @@ fn repl() -> Result<(), std::io::Error> {
                 if let Err(e) = cmp.compile_function(&node, &mut env::Env::new()) {
                     println!("Compile error: {}", e);
                 } else {
-                    match cmp.finish().make_executable() {
+                    match &mut cmp.finish().make_executable() {
                         // FIXME: always prints result as a number
-                        Ok(exec) => println!(
-                            "Result: {}",
-                            object::decode_integer(object::Word::from(exec.exec()))
-                        ),
+                        Ok(exec) => println!("Result: {}", object::decode_integer(exec.exec())),
                         Err(e) => println!("Failed to make executable: {}", e),
                     }
                 }
