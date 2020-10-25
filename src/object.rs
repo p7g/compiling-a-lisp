@@ -26,6 +26,12 @@ pub(crate) const HEAP_PTR_MASK: Uword = !HEAP_TAG_MASK;
 
 pub(crate) const SYMBOL_TAG: usize = 0x5;
 
+pub(crate) const CAR_INDEX: usize = 0;
+pub(crate) const CAR_OFFSET: usize = CAR_INDEX * WORD_SIZE;
+pub(crate) const CDR_INDEX: usize = CAR_INDEX + 1;
+pub(crate) const CDR_OFFSET: usize = CDR_INDEX * WORD_SIZE;
+pub(crate) const PAIR_SIZE: usize = CDR_OFFSET + WORD_SIZE;
+
 #[derive(Debug)]
 pub(crate) enum Error {
     IntegerOutOfRange,
@@ -41,32 +47,36 @@ impl std::error::Error for Error {}
 
 pub(crate) type Result<T> = std::result::Result<T, Error>;
 
-pub(crate) fn encode_integer(value: Word) -> Result<Word> {
+pub(crate) fn encode_integer(value: Word) -> Result<Uword> {
     if INTEGER_MIN > value || value > INTEGER_MAX {
         Err(Error::IntegerOutOfRange)
     } else {
-        Ok(value << INTEGER_SHIFT)
+        Ok((value << INTEGER_SHIFT) as Uword)
     }
 }
 
-pub(crate) fn decode_integer(value: Word) -> Word {
-    (value >> INTEGER_SHIFT) | INTEGER_TAG as Word
+pub(crate) fn decode_integer(value: Uword) -> Word {
+    ((value >> INTEGER_SHIFT) as Word) | INTEGER_TAG as Word
 }
 
-pub(crate) fn encode_char(value: char) -> Word {
-    ((value as Word) << CHAR_SHIFT) | CHAR_TAG as Word
+pub(crate) fn encode_char(value: char) -> Uword {
+    ((value as Uword) << CHAR_SHIFT) | CHAR_TAG as Uword
 }
 
-pub(crate) fn decode_char(value: Word) -> char {
-    ((value >> CHAR_SHIFT) & CHAR_MASK as Word) as u8 as char
+pub(crate) fn decode_char(value: Uword) -> char {
+    ((value >> CHAR_SHIFT) & CHAR_MASK as Uword) as u8 as char
 }
 
-pub(crate) fn encode_bool(value: bool) -> Word {
-    ((if value { 1 } else { 0 } << BOOL_SHIFT) | BOOL_TAG) as Word
+pub(crate) fn encode_bool(value: bool) -> Uword {
+    ((if value { 1 } else { 0 } << BOOL_SHIFT) | BOOL_TAG) as Uword
 }
 
-pub(crate) fn decode_bool(value: Word) -> bool {
-    value & BOOL_MASK as Word != 0
+pub(crate) fn decode_bool(value: Uword) -> bool {
+    value & BOOL_MASK as Uword != 0
+}
+
+pub(crate) fn decode_pair(value: Uword) -> Uword {
+    (value as Uword) & HEAP_PTR_MASK
 }
 
 pub(crate) fn nil() -> Word {

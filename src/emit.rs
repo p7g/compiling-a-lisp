@@ -5,6 +5,8 @@ type Result = std::io::Result<()>;
 const REX_PREFIX: u8 = 0x48;
 
 pub(crate) const FUNCTION_PROLOGUE: &[u8] = &[
+    // Save the heap (first argument) in rsi, our global heap pointer
+    REX_PREFIX, 0x89, 0xfe, // mov rsi, rdi
     0x55, // push rbp
     REX_PREFIX, 0x89, 0xe5, // mov rbp, rsp
 ];
@@ -251,5 +253,11 @@ impl Emit {
         let current_pos = self.buf.code().len() as i32;
         let relative_pos = current_pos - target_pos - std::mem::size_of::<i32>() as i32;
         self.buf.put_32(target_pos as usize, disp32(relative_pos));
+    }
+
+    pub(crate) fn mov_reg_reg(&mut self, dst: Register, src: Register) -> Result {
+        self.buf.write_8(REX_PREFIX)?;
+        self.buf.write_8(0x89)?;
+        self.buf.write_8(0xc0 + src as u8 * 8 + dst as u8)
     }
 }

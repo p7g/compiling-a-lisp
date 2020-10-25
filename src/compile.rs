@@ -9,6 +9,7 @@ use std::convert::TryInto;
 use std::num::TryFromIntError;
 
 const LABEL_PLACEHOLDER: u32 = 0xdeadbeef;
+const HEAP_POINTER: Register = Register::RSI;
 
 #[derive(Debug)]
 pub(crate) enum Error {
@@ -65,7 +66,7 @@ impl Compiler {
         match node {
             ASTNode::Integer(w) => self
                 .emit
-                .mov_reg_imm32(Register::RAX, object::encode_integer(*w)?.try_into()?),
+                .mov_reg_imm32(Register::RAX, object::encode_integer(*w)? as _),
             ASTNode::Char(c) => self
                 .emit
                 .mov_reg_imm32(Register::RAX, object::encode_char(*c) as i32),
@@ -188,6 +189,21 @@ impl Compiler {
                     .and_reg_imm8(Register::RAX, object::IMMEDIATE_TAG_MASK as u8)?;
                 self.compile_compare_imm32(object::BOOL_TAG as i32)?;
             }),
+            "car" => n_args!(1, {
+                self.emit.load_reg_indirect(
+                    Register::RAX,
+                    Indirect(
+                        Register::RAX,
+                        object::CAR_OFFSET as i8 - object::PAIR_TAG as i8,
+                    ),
+                )?;
+            }),
+            "cdr" => n_args!(1, {
+                self.emit.load_reg_indirect(
+                    Register::RAX,
+                    Indirect(Register::RAX, (object::CDR_OFFSET - object::PAIR_TAG) as i8),
+                )?;
+            }),
 
             "+" => n_args!(2, {
                 self.emit.add_reg_indirect(
@@ -242,6 +258,9 @@ impl Compiler {
                     &mut env.extend(),
                     &mut env.extend(),
                 )?;
+            }),
+            "cons" => _n_args!(2, {
+                self.compile_cons(args[0], args[1], stack_index, env)?;
             }),
 
             "if" => _n_args!(3, {
@@ -349,6 +368,41 @@ impl Compiler {
         self.emit.backpatch_imm32(end_pos);
         Ok(())
     }
+
+    fn compile_cons(
+        &mut self,
+        car: &ASTNode,
+        cdr: &ASTNode,
+        stack_index: isize,
+        env: &mut Env,
+    ) -> Result<(), Error> {
+        self.compile_expr(car, stack_index, env)?;
+        // the CAR expression is stored on the stack before moving it to the
+        // heap in case the CDR expression makes use of the heap.
+        self.emit.store_reg_indirect(
+            Indirect(Register::RBP, stack_index.try_into().unwrap()),
+            Register::RAX,
+        )?;
+        self.compile_expr(cdr, stack_index - object::WORD_SIZE as isize, env)?;
+        self.emit.store_reg_indirect(
+            Indirect(HEAP_POINTER, object::CDR_OFFSET as i8),
+            Register::RAX,
+        )?;
+        self.emit.load_reg_indirect(
+            Register::RAX,
+            Indirect(Register::RBP, stack_index.try_into().unwrap()),
+        )?;
+        self.emit.store_reg_indirect(
+            Indirect(HEAP_POINTER, object::CAR_OFFSET as i8),
+            Register::RAX,
+        )?;
+        self.emit.mov_reg_reg(Register::RAX, HEAP_POINTER)?;
+        self.emit
+            .or_reg_imm8(Register::RAX, object::PAIR_TAG as u8)?;
+        self.emit
+            .add_reg_imm32(HEAP_POINTER, object::PAIR_SIZE as i32)?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -394,7 +448,7 @@ mod tests {
         assert_function_contents(buf.code(), expected);
         assert_eq!(
             buf.make_executable()?.exec(),
-            object::encode_integer(value)?.try_into()?
+            object::encode_integer(value)?
         );
         Ok(())
     }
@@ -462,10 +516,7 @@ mod tests {
         ];
         let buf = compiler.finish();
         assert_function_contents(buf.code(), expected);
-        assert_eq!(
-            buf.make_executable()?.exec(),
-            object::encode_integer(124)? as i32
-        );
+        assert_eq!(buf.make_executable()?.exec(), object::encode_integer(124)?);
         Ok(())
     }
 
@@ -480,10 +531,7 @@ mod tests {
         ];
         let buf = compiler.finish();
         assert_function_contents(buf.code(), expected);
-        assert_eq!(
-            buf.make_executable()?.exec(),
-            object::encode_integer(122)? as i32
-        );
+        assert_eq!(buf.make_executable()?.exec(), object::encode_integer(122)?);
         Ok(())
     }
 
@@ -498,10 +546,7 @@ mod tests {
         ];
         let buf = compiler.finish();
         assert_function_contents(buf.code(), expected);
-        assert_eq!(
-            buf.make_executable()?.exec(),
-            object::encode_char('a') as i32
-        );
+        assert_eq!(buf.make_executable()?.exec(), object::encode_char('a'));
         Ok(())
     }
 
@@ -516,10 +561,7 @@ mod tests {
         ];
         let buf = compiler.finish();
         assert_function_contents(buf.code(), expected);
-        assert_eq!(
-            buf.make_executable()?.exec(),
-            object::encode_integer(97)? as i32
-        );
+        assert_eq!(buf.make_executable()?.exec(), object::encode_integer(97)?);
         Ok(())
     }
 
@@ -538,10 +580,7 @@ mod tests {
         ];
         let buf = compiler.finish();
         assert_function_contents(buf.code(), expected);
-        assert_eq!(
-            buf.make_executable()?.exec(),
-            object::encode_integer(125)? as i32
-        );
+        assert_eq!(buf.make_executable()?.exec(), object::encode_integer(125)?);
         Ok(())
     }
 
@@ -564,10 +603,7 @@ mod tests {
         ];
         let buf = compiler.finish();
         assert_function_contents(buf.code(), expected);
-        assert_eq!(
-            buf.make_executable()?.exec(),
-            object::encode_bool(true) as i32
-        );
+        assert_eq!(buf.make_executable()?.exec(), object::encode_bool(true));
         Ok(())
     }
 
@@ -590,10 +626,7 @@ mod tests {
         ];
         let buf = compiler.finish();
         assert_function_contents(buf.code(), expected);
-        assert_eq!(
-            buf.make_executable()?.exec(),
-            object::encode_bool(false) as i32
-        );
+        assert_eq!(buf.make_executable()?.exec(), object::encode_bool(false));
         Ok(())
     }
 
@@ -616,10 +649,7 @@ mod tests {
         ];
         let buf = compiler.finish();
         assert_function_contents(buf.code(), expected);
-        assert_eq!(
-            buf.make_executable()?.exec(),
-            object::encode_bool(true) as i32
-        );
+        assert_eq!(buf.make_executable()?.exec(), object::encode_bool(true));
         Ok(())
     }
 
@@ -642,10 +672,7 @@ mod tests {
         ];
         let buf = compiler.finish();
         assert_function_contents(buf.code(), expected);
-        assert_eq!(
-            buf.make_executable()?.exec(),
-            object::encode_bool(false) as i32
-        );
+        assert_eq!(buf.make_executable()?.exec(), object::encode_bool(false));
         Ok(())
     }
 
@@ -668,10 +695,7 @@ mod tests {
         ];
         let buf = compiler.finish();
         assert_function_contents(buf.code(), expected);
-        assert_eq!(
-            buf.make_executable()?.exec(),
-            object::encode_bool(true) as i32
-        );
+        assert_eq!(buf.make_executable()?.exec(), object::encode_bool(true));
         Ok(())
     }
 
@@ -694,10 +718,7 @@ mod tests {
         ];
         let buf = compiler.finish();
         assert_function_contents(buf.code(), expected);
-        assert_eq!(
-            buf.make_executable()?.exec(),
-            object::encode_bool(false) as i32
-        );
+        assert_eq!(buf.make_executable()?.exec(), object::encode_bool(false));
         Ok(())
     }
 
@@ -721,10 +742,7 @@ mod tests {
         ];
         let buf = compiler.finish();
         assert_function_contents(buf.code(), expected);
-        assert_eq!(
-            buf.make_executable()?.exec(),
-            object::encode_bool(true) as i32
-        );
+        assert_eq!(buf.make_executable()?.exec(), object::encode_bool(true));
         Ok(())
     }
 
@@ -748,10 +766,7 @@ mod tests {
         ];
         let buf = compiler.finish();
         assert_function_contents(buf.code(), expected);
-        assert_eq!(
-            buf.make_executable()?.exec(),
-            object::encode_bool(false) as i32
-        );
+        assert_eq!(buf.make_executable()?.exec(), object::encode_bool(false));
         Ok(())
     }
 
@@ -775,10 +790,7 @@ mod tests {
         ];
         let buf = compiler.finish();
         assert_function_contents(buf.code(), expected);
-        assert_eq!(
-            buf.make_executable()?.exec(),
-            object::encode_bool(true) as i32
-        );
+        assert_eq!(buf.make_executable()?.exec(), object::encode_bool(true));
         Ok(())
     }
 
@@ -802,10 +814,7 @@ mod tests {
         ];
         let buf = compiler.finish();
         assert_function_contents(buf.code(), expected);
-        assert_eq!(
-            buf.make_executable()?.exec(),
-            object::encode_bool(false) as i32
-        );
+        assert_eq!(buf.make_executable()?.exec(), object::encode_bool(false));
         Ok(())
     }
 
@@ -827,10 +836,7 @@ mod tests {
         ];
         let buf = compiler.finish();
         assert_function_contents(buf.code(), expected);
-        assert_eq!(
-            buf.make_executable()?.exec(),
-            object::encode_integer(13)? as i32
-        );
+        assert_eq!(buf.make_executable()?.exec(), object::encode_integer(13)?);
         Ok(())
     }
 
@@ -865,10 +871,7 @@ mod tests {
         ];
         let buf = compiler.finish();
         assert_function_contents(buf.code(), expected);
-        assert_eq!(
-            buf.make_executable()?.exec(),
-            object::encode_integer(10)? as i32
-        );
+        assert_eq!(buf.make_executable()?.exec(), object::encode_integer(10)?);
         Ok(())
     }
 
@@ -890,10 +893,7 @@ mod tests {
         ];
         let buf = compiler.finish();
         assert_function_contents(buf.code(), expected);
-        assert_eq!(
-            buf.make_executable()?.exec(),
-            object::encode_integer(-3)? as i32
-        );
+        assert_eq!(buf.make_executable()?.exec(), object::encode_integer(-3)?);
         Ok(())
     }
 
@@ -928,10 +928,7 @@ mod tests {
         ];
         let buf = compiler.finish();
         assert_function_contents(buf.code(), expected);
-        assert_eq!(
-            buf.make_executable()?.exec(),
-            object::encode_integer(3)? as i32
-        );
+        assert_eq!(buf.make_executable()?.exec(), object::encode_integer(3)?);
         Ok(())
     }
 
@@ -942,10 +939,7 @@ mod tests {
         let mut compiler = Compiler::new(Emit::new(Buffer::new(10)?));
         compiler.compile_function(&node, &mut Env::new())?;
         let buf = compiler.finish();
-        assert_eq!(
-            buf.make_executable()?.exec(),
-            object::encode_integer(40)? as i32
-        );
+        assert_eq!(buf.make_executable()?.exec(), object::encode_integer(40)?);
         Ok(())
     }
 
@@ -959,10 +953,7 @@ mod tests {
         let mut compiler = Compiler::new(Emit::new(Buffer::new(10)?));
         compiler.compile_function(&node, &mut Env::new())?;
         let buf = compiler.finish();
-        assert_eq!(
-            buf.make_executable()?.exec(),
-            object::encode_integer(24)? as i32
-        );
+        assert_eq!(buf.make_executable()?.exec(), object::encode_integer(24)?);
         Ok(())
     }
 
@@ -973,10 +964,7 @@ mod tests {
         let mut compiler = Compiler::new(Emit::new(Buffer::new(10)?));
         compiler.compile_function(&node, &mut Env::new())?;
         let buf = compiler.finish();
-        assert_eq!(
-            buf.make_executable()?.exec(),
-            object::encode_bool(true) as i32
-        );
+        assert_eq!(buf.make_executable()?.exec(), object::encode_bool(true));
         Ok(())
     }
 
@@ -987,10 +975,7 @@ mod tests {
         let mut compiler = Compiler::new(Emit::new(Buffer::new(10)?));
         compiler.compile_function(&node, &mut Env::new())?;
         let buf = compiler.finish();
-        assert_eq!(
-            buf.make_executable()?.exec(),
-            object::encode_bool(false) as i32
-        );
+        assert_eq!(buf.make_executable()?.exec(), object::encode_bool(false));
         Ok(())
     }
 
@@ -1001,10 +986,7 @@ mod tests {
         let mut compiler = Compiler::new(Emit::new(Buffer::new(10)?));
         compiler.compile_function(&node, &mut Env::new())?;
         let buf = compiler.finish();
-        assert_eq!(
-            buf.make_executable()?.exec(),
-            object::encode_bool(true) as i32
-        );
+        assert_eq!(buf.make_executable()?.exec(), object::encode_bool(true));
         Ok(())
     }
 
@@ -1015,10 +997,7 @@ mod tests {
         let mut compiler = Compiler::new(Emit::new(Buffer::new(10)?));
         compiler.compile_function(&node, &mut Env::new())?;
         let buf = compiler.finish();
-        assert_eq!(
-            buf.make_executable()?.exec(),
-            object::encode_bool(false) as i32
-        );
+        assert_eq!(buf.make_executable()?.exec(), object::encode_bool(false));
         Ok(())
     }
 
@@ -1029,10 +1008,7 @@ mod tests {
         let mut compiler = Compiler::new(Emit::new(Buffer::new(10)?));
         compiler.compile_function(&node, &mut Env::new())?;
         let buf = compiler.finish();
-        assert_eq!(
-            buf.make_executable()?.exec(),
-            object::encode_bool(false) as i32
-        );
+        assert_eq!(buf.make_executable()?.exec(), object::encode_bool(false));
         Ok(())
     }
 
@@ -1119,10 +1095,7 @@ mod tests {
         ];
         let buf = compiler.finish();
         assert_function_contents(buf.code(), expected);
-        assert_eq!(
-            buf.make_executable()?.exec(),
-            object::encode_integer(1)? as i32
-        );
+        assert_eq!(buf.make_executable()?.exec(), object::encode_integer(1)?);
         Ok(())
     }
 
@@ -1147,10 +1120,7 @@ mod tests {
         ];
         let buf = compiler.finish();
         assert_function_contents(buf.code(), expected);
-        assert_eq!(
-            buf.make_executable()?.exec(),
-            object::encode_integer(2)? as i32
-        );
+        assert_eq!(buf.make_executable()?.exec(), object::encode_integer(2)?);
         Ok(())
     }
 
@@ -1161,8 +1131,125 @@ mod tests {
         compiler.compile_function(&node, &mut Env::new())?;
         assert_eq!(
             compiler.finish().make_executable()?.exec(),
-            object::encode_integer(4)? as i32
+            object::encode_integer(4)?
         );
+        Ok(())
+    }
+
+    #[test]
+    fn compile_cons() -> Result {
+        let node = read("(cons 1 2)")?;
+        let mut compiler = Compiler::new(Emit::new(Buffer::new(10)?));
+        compiler.compile_function(&node, &mut Env::new())?;
+        // mov rax, 0x2
+        // mov [rbp-8], rax
+        // mov rax, 0x4
+        // mov [rsi+Cdr], rax
+        // mov rax, [rbp-8]
+        // mov [rsi+Car], rax
+        // mov rax, rsi
+        // or rax, kPairTag
+        // add rsi, 2*kWordSize
+        let expected: &[u8] = &[
+            0x48, 0xc7, 0xc0, 0x04, 0x00, 0x00, 0x00, 0x48, 0x89, 0x45, 0xf8, 0x48, 0xc7, 0xc0,
+            0x08, 0x00, 0x00, 0x00, 0x48, 0x89, 0x46, 0x08, 0x48, 0x8b, 0x45, 0xf8, 0x48, 0x89,
+            0x46, 0x00, 0x48, 0x89, 0xf0, 0x48, 0x83, 0xc8, 0x01, 0x48, 0x81, 0xc6, 0x10, 0x00,
+            0x00, 0x00,
+        ];
+        let buf = compiler.finish();
+        assert_function_contents(buf.code(), expected);
+        let mut exec = buf.make_executable()?;
+        let ptr = object::decode_pair(exec.exec().into()) as *const object::Uword;
+        let offset = unsafe { ptr.offset_from(exec.heap().as_ptr()) } as usize;
+        assert!(offset < exec.heap().len());
+        assert_eq!(exec.heap()[offset], object::encode_integer(1)?); // car
+        assert_eq!(exec.heap()[offset + 1], object::encode_integer(2)?); // cdr
+        Ok(())
+    }
+
+    #[test]
+    fn compile_nested_cons() -> Result {
+        let node = read("(cons (cons 1 2) (cons 3 4))")?;
+        let mut compiler = Compiler::new(Emit::new(Buffer::new(10)?));
+        compiler.compile_function(&node, &mut Env::new())?;
+        let buf = compiler.finish();
+        let mut exec = buf.make_executable()?;
+
+        macro_rules! ptr_to_offset {
+            ($ptr:expr) => {{
+                let offset = unsafe { $ptr.offset_from(exec.heap().as_ptr()) } as usize;
+                assert!(offset < exec.heap().len());
+                offset
+            }};
+        }
+
+        let ptr = object::decode_pair(exec.exec().into()) as *const object::Uword;
+        let offset = ptr_to_offset!(ptr);
+
+        let car_offset =
+            ptr_to_offset!(object::decode_pair(exec.heap()[offset]) as *const object::Uword);
+        let cdr_offset =
+            ptr_to_offset!(object::decode_pair(exec.heap()[offset + 1]) as *const object::Uword);
+
+        assert_eq!(object::decode_integer(exec.heap()[car_offset]), 1);
+        assert_eq!(object::decode_integer(exec.heap()[car_offset + 1]), 2);
+        assert_eq!(object::decode_integer(exec.heap()[cdr_offset]), 3);
+        assert_eq!(object::decode_integer(exec.heap()[cdr_offset + 1]), 4);
+
+        Ok(())
+    }
+
+    #[test]
+    fn compile_car() -> Result {
+        let node = read("(car (cons 1 2))")?;
+        let mut compiler = Compiler::new(Emit::new(Buffer::new(10)?));
+        compiler.compile_function(&node, &mut Env::new())?;
+        // mov rax, 0x2
+        // mov [rbp-8], rax
+        // mov rax, 0x4
+        // mov [rsi+Cdr], rax
+        // mov rax, [rbp-8]
+        // mov [rsi+Car], rax
+        // mov rax, rsi
+        // or rax, kPairTag
+        // add rsi, 2*kWordSize
+        // mov rax, [rax-1]
+        let expected: &[u8] = &[
+            0x48, 0xc7, 0xc0, 0x04, 0x00, 0x00, 0x00, 0x48, 0x89, 0x45, 0xf8, 0x48, 0xc7, 0xc0,
+            0x08, 0x00, 0x00, 0x00, 0x48, 0x89, 0x46, 0x08, 0x48, 0x8b, 0x45, 0xf8, 0x48, 0x89,
+            0x46, 0x00, 0x48, 0x89, 0xf0, 0x48, 0x83, 0xc8, 0x01, 0x48, 0x81, 0xc6, 0x10, 0x00,
+            0x00, 0x00, 0x48, 0x8b, 0x40, 0xff,
+        ];
+        let buf = compiler.finish();
+        assert_function_contents(buf.code(), expected);
+        assert_eq!(object::decode_integer(buf.make_executable()?.exec()), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn compile_cdr() -> Result {
+        let node = read("(cdr (cons 1 2))")?;
+        let mut compiler = Compiler::new(Emit::new(Buffer::new(10)?));
+        compiler.compile_function(&node, &mut Env::new())?;
+        // mov rax, 0x2
+        // mov [rbp-8], rax
+        // mov rax, 0x4
+        // mov [rsi+Cdr], rax
+        // mov rax, [rbp-8]
+        // mov [rsi+Car], rax
+        // mov rax, rsi
+        // or rax, kPairTag
+        // add rsi, 2*kWordSize
+        // mov rax, [rax+7]
+        let expected: &[u8] = &[
+            0x48, 0xc7, 0xc0, 0x04, 0x00, 0x00, 0x00, 0x48, 0x89, 0x45, 0xf8, 0x48, 0xc7, 0xc0,
+            0x08, 0x00, 0x00, 0x00, 0x48, 0x89, 0x46, 0x08, 0x48, 0x8b, 0x45, 0xf8, 0x48, 0x89,
+            0x46, 0x00, 0x48, 0x89, 0xf0, 0x48, 0x83, 0xc8, 0x01, 0x48, 0x81, 0xc6, 0x10, 0x00,
+            0x00, 0x00, 0x48, 0x8b, 0x40, 0x07,
+        ];
+        let buf = compiler.finish();
+        assert_function_contents(buf.code(), expected);
+        assert_eq!(object::decode_integer(buf.make_executable()?.exec()), 2);
         Ok(())
     }
 }
