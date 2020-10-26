@@ -9,6 +9,7 @@ mod exec;
 mod object;
 mod reader;
 
+use object::Object;
 use std::io::{stdin, stdout, BufRead, Write};
 
 fn main() {
@@ -54,8 +55,10 @@ fn repl() -> Result<(), std::io::Error> {
                     println!("Compile error: {}", e);
                 } else {
                     match &mut cmp.finish().make_executable() {
-                        // FIXME: always prints result as a number
-                        Ok(exec) => println!("Result: {}", object::decode_integer(exec.exec())),
+                        Ok(exec) => {
+                            let result = exec.exec();
+                            println!("Result: {}", Object::decode(exec.heap(), result));
+                        }
                         Err(e) => println!("Failed to make executable: {}", e),
                     }
                 }

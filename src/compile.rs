@@ -4,7 +4,7 @@ use crate::emit::{
     Condition, Emit, Indirect, Register, RegisterPiece, FUNCTION_EPILOGUE, FUNCTION_PROLOGUE,
 };
 use crate::env::Env;
-use crate::object;
+use crate::object::{self, Object};
 use std::convert::TryInto;
 use std::num::TryFromIntError;
 
@@ -13,7 +13,6 @@ const HEAP_POINTER: Register = Register::RSI;
 
 #[derive(Debug)]
 pub(crate) enum Error {
-    ObjectError(object::Error),
     ConversionError(TryFromIntError),
     IOError(std::io::Error),
     NotImplemented(String),
@@ -32,7 +31,6 @@ macro_rules! impl_from_error {
 }
 
 impl_from_error!(std::io::Error, Error::IOError);
-impl_from_error!(object::Error, Error::ObjectError);
 impl_from_error!(TryFromIntError, Error::ConversionError);
 impl_from_error!(String, Error::NotImplemented);
 
@@ -66,14 +64,16 @@ impl Compiler {
         match node {
             ASTNode::Integer(w) => self
                 .emit
-                .mov_reg_imm32(Register::RAX, object::encode_integer(*w)? as _),
+                .mov_reg_imm32(Register::RAX, Object::Integer(*w).encode() as _),
             ASTNode::Char(c) => self
                 .emit
-                .mov_reg_imm32(Register::RAX, object::encode_char(*c) as i32),
+                .mov_reg_imm32(Register::RAX, Object::Char(*c).encode() as i32),
             ASTNode::Bool(b) => self
                 .emit
-                .mov_reg_imm32(Register::RAX, object::encode_bool(*b) as i32),
-            ASTNode::Nil => self.emit.mov_reg_imm32(Register::RAX, object::nil() as i32),
+                .mov_reg_imm32(Register::RAX, Object::Bool(*b).encode() as i32),
+            ASTNode::Nil => self
+                .emit
+                .mov_reg_imm32(Register::RAX, Object::Nil.encode() as i32),
             ASTNode::Pair(p) => Ok(self.compile_call(&*p, stack_index, env)?),
             ASTNode::Symbol(sym) => Ok(self.compile_symbol(sym, env)?),
         }?;
@@ -152,11 +152,11 @@ impl Compiler {
         match callable {
             "add1" => n_args!(1, {
                 self.emit
-                    .add_reg_imm32(Register::RAX, object::encode_integer(1)? as i32)?;
+                    .add_reg_imm32(Register::RAX, Object::Integer(1).encode() as i32)?;
             }),
             "sub1" => n_args!(1, {
                 self.emit
-                    .sub_reg_imm32(Register::RAX, object::encode_integer(1)? as i32)?;
+                    .sub_reg_imm32(Register::RAX, Object::Integer(1).encode() as i32)?;
             }),
             "integer->char" => n_args!(1, {
                 self.emit.shl_reg_imm8(
@@ -172,12 +172,14 @@ impl Compiler {
                     (object::CHAR_SHIFT - object::INTEGER_SHIFT) as i8,
                 )?;
             }),
-            "nil?" => n_args!(1, { self.compile_compare_imm32(object::nil() as i32)? }),
+            "nil?" => n_args!(1, {
+                self.compile_compare_imm32(Object::Nil.encode() as i32)?
+            }),
             "zero?" => n_args!(1, {
-                self.compile_compare_imm32(object::encode_integer(0)? as i32)?
+                self.compile_compare_imm32(Object::Integer(0).encode() as i32)?
             }),
             "not" => n_args!(1, {
-                self.compile_compare_imm32(object::encode_bool(false) as i32)?
+                self.compile_compare_imm32(Object::Bool(false).encode() as i32)?
             }),
             "integer?" => n_args!(1, {
                 self.emit
@@ -230,7 +232,7 @@ impl Compiler {
                     Indirect(Register::RBP, stack_index.try_into().unwrap()),
                 )?;
                 self.emit
-                    .mov_reg_imm32(Register::RAX, object::encode_integer(0)? as i32)?;
+                    .mov_reg_imm32(Register::RAX, Object::Integer(0).encode() as i32)?;
                 self.emit.setcc_imm8(Condition::Equal, RegisterPiece::Al)?;
                 self.emit
                     .shl_reg_imm8(Register::RAX, object::BOOL_SHIFT as i8)?;
@@ -243,7 +245,7 @@ impl Compiler {
                     Indirect(Register::RBP, stack_index.try_into().unwrap()),
                 )?;
                 self.emit
-                    .mov_reg_imm32(Register::RAX, object::encode_integer(0)? as i32)?;
+                    .mov_reg_imm32(Register::RAX, Object::Integer(0).encode() as i32)?;
                 self.emit.setcc_imm8(Condition::Less, RegisterPiece::Al)?;
                 self.emit
                     .shl_reg_imm8(Register::RAX, object::BOOL_SHIFT as i8)?;
@@ -356,7 +358,7 @@ impl Compiler {
     ) -> Result<(), Error> {
         self.compile_expr(cond, stack_index, env)?;
         self.emit
-            .cmp_reg_imm32(Register::RAX, object::encode_bool(false) as i32)?;
+            .cmp_reg_imm32(Register::RAX, Object::Bool(false).encode() as i32)?;
 
         let alternate_pos = self.emit.jcc(Condition::Equal, LABEL_PLACEHOLDER as i32)?;
         self.compile_expr(consequent, stack_index, env)?;
@@ -432,7 +434,7 @@ mod tests {
         assert_function_contents(buf.code(), expected);
         assert_eq!(
             buf.make_executable()?.exec(),
-            object::encode_integer(value)?.try_into()?
+            Object::Integer(value).encode().try_into()?
         );
         Ok(())
     }
@@ -448,7 +450,7 @@ mod tests {
         assert_function_contents(buf.code(), expected);
         assert_eq!(
             buf.make_executable()?.exec(),
-            object::encode_integer(value)?
+            Object::Integer(value).encode()
         );
         Ok(())
     }
@@ -464,7 +466,7 @@ mod tests {
         assert_function_contents(buf.code(), expected);
         assert_eq!(
             buf.make_executable()?.exec(),
-            object::encode_char(value).try_into()?
+            Object::Char(value).encode().try_into()?
         );
         Ok(())
     }
@@ -488,7 +490,7 @@ mod tests {
             assert_function_contents(buf.code(), expected);
             assert_eq!(
                 buf.make_executable()?.exec(),
-                object::encode_bool(*value).try_into()?
+                Object::Bool(*value).encode().try_into()?
             );
         }
         Ok(())
@@ -502,7 +504,10 @@ mod tests {
         let buf = compiler.finish();
         let expected = &[0x48, 0xc7, 0xc0, 0x2f, 0x00, 0x00, 0x00];
         assert_function_contents(buf.code(), expected);
-        assert_eq!(buf.make_executable()?.exec(), object::nil().try_into()?);
+        assert_eq!(
+            buf.make_executable()?.exec(),
+            Object::Nil.encode().try_into()?
+        );
         Ok(())
     }
 
@@ -516,7 +521,7 @@ mod tests {
         ];
         let buf = compiler.finish();
         assert_function_contents(buf.code(), expected);
-        assert_eq!(buf.make_executable()?.exec(), object::encode_integer(124)?);
+        assert_eq!(buf.make_executable()?.exec(), Object::Integer(124).encode());
         Ok(())
     }
 
@@ -531,7 +536,7 @@ mod tests {
         ];
         let buf = compiler.finish();
         assert_function_contents(buf.code(), expected);
-        assert_eq!(buf.make_executable()?.exec(), object::encode_integer(122)?);
+        assert_eq!(buf.make_executable()?.exec(), Object::Integer(122).encode());
         Ok(())
     }
 
@@ -546,7 +551,7 @@ mod tests {
         ];
         let buf = compiler.finish();
         assert_function_contents(buf.code(), expected);
-        assert_eq!(buf.make_executable()?.exec(), object::encode_char('a'));
+        assert_eq!(buf.make_executable()?.exec(), Object::Char('a').encode());
         Ok(())
     }
 
@@ -561,7 +566,7 @@ mod tests {
         ];
         let buf = compiler.finish();
         assert_function_contents(buf.code(), expected);
-        assert_eq!(buf.make_executable()?.exec(), object::encode_integer(97)?);
+        assert_eq!(buf.make_executable()?.exec(), Object::Integer(97).encode());
         Ok(())
     }
 
@@ -580,7 +585,7 @@ mod tests {
         ];
         let buf = compiler.finish();
         assert_function_contents(buf.code(), expected);
-        assert_eq!(buf.make_executable()?.exec(), object::encode_integer(125)?);
+        assert_eq!(buf.make_executable()?.exec(), Object::Integer(125).encode());
         Ok(())
     }
 
@@ -603,7 +608,7 @@ mod tests {
         ];
         let buf = compiler.finish();
         assert_function_contents(buf.code(), expected);
-        assert_eq!(buf.make_executable()?.exec(), object::encode_bool(true));
+        assert_eq!(buf.make_executable()?.exec(), Object::Bool(true).encode());
         Ok(())
     }
 
@@ -626,7 +631,7 @@ mod tests {
         ];
         let buf = compiler.finish();
         assert_function_contents(buf.code(), expected);
-        assert_eq!(buf.make_executable()?.exec(), object::encode_bool(false));
+        assert_eq!(buf.make_executable()?.exec(), Object::Bool(false).encode());
         Ok(())
     }
 
@@ -649,7 +654,7 @@ mod tests {
         ];
         let buf = compiler.finish();
         assert_function_contents(buf.code(), expected);
-        assert_eq!(buf.make_executable()?.exec(), object::encode_bool(true));
+        assert_eq!(buf.make_executable()?.exec(), Object::Bool(true).encode());
         Ok(())
     }
 
@@ -672,7 +677,7 @@ mod tests {
         ];
         let buf = compiler.finish();
         assert_function_contents(buf.code(), expected);
-        assert_eq!(buf.make_executable()?.exec(), object::encode_bool(false));
+        assert_eq!(buf.make_executable()?.exec(), Object::Bool(false).encode());
         Ok(())
     }
 
@@ -695,7 +700,7 @@ mod tests {
         ];
         let buf = compiler.finish();
         assert_function_contents(buf.code(), expected);
-        assert_eq!(buf.make_executable()?.exec(), object::encode_bool(true));
+        assert_eq!(buf.make_executable()?.exec(), Object::Bool(true).encode());
         Ok(())
     }
 
@@ -718,7 +723,7 @@ mod tests {
         ];
         let buf = compiler.finish();
         assert_function_contents(buf.code(), expected);
-        assert_eq!(buf.make_executable()?.exec(), object::encode_bool(false));
+        assert_eq!(buf.make_executable()?.exec(), Object::Bool(false).encode());
         Ok(())
     }
 
@@ -742,7 +747,7 @@ mod tests {
         ];
         let buf = compiler.finish();
         assert_function_contents(buf.code(), expected);
-        assert_eq!(buf.make_executable()?.exec(), object::encode_bool(true));
+        assert_eq!(buf.make_executable()?.exec(), Object::Bool(true).encode());
         Ok(())
     }
 
@@ -766,7 +771,7 @@ mod tests {
         ];
         let buf = compiler.finish();
         assert_function_contents(buf.code(), expected);
-        assert_eq!(buf.make_executable()?.exec(), object::encode_bool(false));
+        assert_eq!(buf.make_executable()?.exec(), Object::Bool(false).encode());
         Ok(())
     }
 
@@ -790,7 +795,7 @@ mod tests {
         ];
         let buf = compiler.finish();
         assert_function_contents(buf.code(), expected);
-        assert_eq!(buf.make_executable()?.exec(), object::encode_bool(true));
+        assert_eq!(buf.make_executable()?.exec(), Object::Bool(true).encode());
         Ok(())
     }
 
@@ -814,7 +819,7 @@ mod tests {
         ];
         let buf = compiler.finish();
         assert_function_contents(buf.code(), expected);
-        assert_eq!(buf.make_executable()?.exec(), object::encode_bool(false));
+        assert_eq!(buf.make_executable()?.exec(), Object::Bool(false).encode());
         Ok(())
     }
 
@@ -836,7 +841,7 @@ mod tests {
         ];
         let buf = compiler.finish();
         assert_function_contents(buf.code(), expected);
-        assert_eq!(buf.make_executable()?.exec(), object::encode_integer(13)?);
+        assert_eq!(buf.make_executable()?.exec(), Object::Integer(13).encode());
         Ok(())
     }
 
@@ -871,7 +876,7 @@ mod tests {
         ];
         let buf = compiler.finish();
         assert_function_contents(buf.code(), expected);
-        assert_eq!(buf.make_executable()?.exec(), object::encode_integer(10)?);
+        assert_eq!(buf.make_executable()?.exec(), Object::Integer(10).encode());
         Ok(())
     }
 
@@ -893,7 +898,7 @@ mod tests {
         ];
         let buf = compiler.finish();
         assert_function_contents(buf.code(), expected);
-        assert_eq!(buf.make_executable()?.exec(), object::encode_integer(-3)?);
+        assert_eq!(buf.make_executable()?.exec(), Object::Integer(-3).encode());
         Ok(())
     }
 
@@ -928,7 +933,7 @@ mod tests {
         ];
         let buf = compiler.finish();
         assert_function_contents(buf.code(), expected);
-        assert_eq!(buf.make_executable()?.exec(), object::encode_integer(3)?);
+        assert_eq!(buf.make_executable()?.exec(), Object::Integer(3).encode());
         Ok(())
     }
 
@@ -939,7 +944,7 @@ mod tests {
         let mut compiler = Compiler::new(Emit::new(Buffer::new(10)?));
         compiler.compile_function(&node, &mut Env::new())?;
         let buf = compiler.finish();
-        assert_eq!(buf.make_executable()?.exec(), object::encode_integer(40)?);
+        assert_eq!(buf.make_executable()?.exec(), Object::Integer(40).encode());
         Ok(())
     }
 
@@ -953,7 +958,7 @@ mod tests {
         let mut compiler = Compiler::new(Emit::new(Buffer::new(10)?));
         compiler.compile_function(&node, &mut Env::new())?;
         let buf = compiler.finish();
-        assert_eq!(buf.make_executable()?.exec(), object::encode_integer(24)?);
+        assert_eq!(buf.make_executable()?.exec(), Object::Integer(24).encode());
         Ok(())
     }
 
@@ -964,7 +969,7 @@ mod tests {
         let mut compiler = Compiler::new(Emit::new(Buffer::new(10)?));
         compiler.compile_function(&node, &mut Env::new())?;
         let buf = compiler.finish();
-        assert_eq!(buf.make_executable()?.exec(), object::encode_bool(true));
+        assert_eq!(buf.make_executable()?.exec(), Object::Bool(true).encode());
         Ok(())
     }
 
@@ -975,7 +980,7 @@ mod tests {
         let mut compiler = Compiler::new(Emit::new(Buffer::new(10)?));
         compiler.compile_function(&node, &mut Env::new())?;
         let buf = compiler.finish();
-        assert_eq!(buf.make_executable()?.exec(), object::encode_bool(false));
+        assert_eq!(buf.make_executable()?.exec(), Object::Bool(false).encode());
         Ok(())
     }
 
@@ -986,7 +991,7 @@ mod tests {
         let mut compiler = Compiler::new(Emit::new(Buffer::new(10)?));
         compiler.compile_function(&node, &mut Env::new())?;
         let buf = compiler.finish();
-        assert_eq!(buf.make_executable()?.exec(), object::encode_bool(true));
+        assert_eq!(buf.make_executable()?.exec(), Object::Bool(true).encode());
         Ok(())
     }
 
@@ -997,7 +1002,7 @@ mod tests {
         let mut compiler = Compiler::new(Emit::new(Buffer::new(10)?));
         compiler.compile_function(&node, &mut Env::new())?;
         let buf = compiler.finish();
-        assert_eq!(buf.make_executable()?.exec(), object::encode_bool(false));
+        assert_eq!(buf.make_executable()?.exec(), Object::Bool(false).encode());
         Ok(())
     }
 
@@ -1008,7 +1013,7 @@ mod tests {
         let mut compiler = Compiler::new(Emit::new(Buffer::new(10)?));
         compiler.compile_function(&node, &mut Env::new())?;
         let buf = compiler.finish();
-        assert_eq!(buf.make_executable()?.exec(), object::encode_bool(false));
+        assert_eq!(buf.make_executable()?.exec(), Object::Bool(false).encode());
         Ok(())
     }
 
@@ -1017,10 +1022,9 @@ mod tests {
         let node = read("(let () (+ 1 2))")?;
         let mut compiler = Compiler::new(Emit::new(Buffer::new(10)?));
         compiler.compile_function(&node, &mut Env::new())?;
-        assert_eq!(
-            object::decode_integer(compiler.finish().make_executable()?.exec().into()),
-            3
-        );
+        let mut exec = compiler.finish().make_executable()?;
+        let result = exec.exec();
+        assert_eq!(Object::decode(exec.heap(), result.into()), Object::Integer(3));
         Ok(())
     }
 
@@ -1029,10 +1033,9 @@ mod tests {
         let node = read("(let ((a 1)) (+ a 2))")?;
         let mut compiler = Compiler::new(Emit::new(Buffer::new(10)?));
         compiler.compile_function(&node, &mut Env::new())?;
-        assert_eq!(
-            object::decode_integer(compiler.finish().make_executable()?.exec().into()),
-            3
-        );
+        let mut exec = compiler.finish().make_executable()?;
+        let result = exec.exec();
+        assert_eq!(Object::decode(exec.heap(), result.into()), Object::Integer(3));
         Ok(())
     }
 
@@ -1041,10 +1044,9 @@ mod tests {
         let node = read("(let ((a 1) (b 2)) (+ a b))")?;
         let mut compiler = Compiler::new(Emit::new(Buffer::new(10)?));
         compiler.compile_function(&node, &mut Env::new())?;
-        assert_eq!(
-            object::decode_integer(compiler.finish().make_executable()?.exec().into()),
-            3
-        );
+        let mut exec = compiler.finish().make_executable()?;
+        let result = exec.exec();
+        assert_eq!(Object::decode(exec.heap(), result.into()), Object::Integer(3));
         Ok(())
     }
 
@@ -1053,10 +1055,9 @@ mod tests {
         let node = read("(let ((a 1)) (let ((b 2)) (+ a b)))")?;
         let mut compiler = Compiler::new(Emit::new(Buffer::new(10)?));
         compiler.compile_function(&node, &mut Env::new())?;
-        assert_eq!(
-            object::decode_integer(compiler.finish().make_executable()?.exec().into()),
-            3
-        );
+        let mut exec = compiler.finish().make_executable()?;
+        let result = exec.exec();
+        assert_eq!(Object::decode(exec.heap(), result.into()), Object::Integer(3));
         Ok(())
     }
 
@@ -1095,7 +1096,7 @@ mod tests {
         ];
         let buf = compiler.finish();
         assert_function_contents(buf.code(), expected);
-        assert_eq!(buf.make_executable()?.exec(), object::encode_integer(1)?);
+        assert_eq!(buf.make_executable()?.exec(), Object::Integer(1).encode());
         Ok(())
     }
 
@@ -1120,7 +1121,7 @@ mod tests {
         ];
         let buf = compiler.finish();
         assert_function_contents(buf.code(), expected);
-        assert_eq!(buf.make_executable()?.exec(), object::encode_integer(2)?);
+        assert_eq!(buf.make_executable()?.exec(), Object::Integer(2).encode());
         Ok(())
     }
 
@@ -1131,7 +1132,7 @@ mod tests {
         compiler.compile_function(&node, &mut Env::new())?;
         assert_eq!(
             compiler.finish().make_executable()?.exec(),
-            object::encode_integer(4)?
+            Object::Integer(4).encode()
         );
         Ok(())
     }
@@ -1159,11 +1160,11 @@ mod tests {
         let buf = compiler.finish();
         assert_function_contents(buf.code(), expected);
         let mut exec = buf.make_executable()?;
-        let ptr = object::decode_pair(exec.exec().into()) as *const object::Uword;
-        let offset = unsafe { ptr.offset_from(exec.heap().as_ptr()) } as usize;
-        assert!(offset < exec.heap().len());
-        assert_eq!(exec.heap()[offset], object::encode_integer(1)?); // car
-        assert_eq!(exec.heap()[offset + 1], object::encode_integer(2)?); // cdr
+        let result = exec.exec();
+        assert_eq!(
+            Object::Pair(Box::new(Object::Integer(1)), Box::new(Object::Integer(2))),
+            Object::decode(exec.heap(), result)
+        );
         Ok(())
     }
 
@@ -1174,27 +1175,21 @@ mod tests {
         compiler.compile_function(&node, &mut Env::new())?;
         let buf = compiler.finish();
         let mut exec = buf.make_executable()?;
+        let result = exec.exec();
 
-        macro_rules! ptr_to_offset {
-            ($ptr:expr) => {{
-                let offset = unsafe { $ptr.offset_from(exec.heap().as_ptr()) } as usize;
-                assert!(offset < exec.heap().len());
-                offset
-            }};
-        }
-
-        let ptr = object::decode_pair(exec.exec().into()) as *const object::Uword;
-        let offset = ptr_to_offset!(ptr);
-
-        let car_offset =
-            ptr_to_offset!(object::decode_pair(exec.heap()[offset]) as *const object::Uword);
-        let cdr_offset =
-            ptr_to_offset!(object::decode_pair(exec.heap()[offset + 1]) as *const object::Uword);
-
-        assert_eq!(object::decode_integer(exec.heap()[car_offset]), 1);
-        assert_eq!(object::decode_integer(exec.heap()[car_offset + 1]), 2);
-        assert_eq!(object::decode_integer(exec.heap()[cdr_offset]), 3);
-        assert_eq!(object::decode_integer(exec.heap()[cdr_offset + 1]), 4);
+        assert_eq!(
+            Object::Pair(
+                Box::new(Object::Pair(
+                    Box::new(Object::Integer(1)),
+                    Box::new(Object::Integer(2)),
+                )),
+                Box::new(Object::Pair(
+                    Box::new(Object::Integer(3)),
+                    Box::new(Object::Integer(4)),
+                )),
+            ),
+            Object::decode(exec.heap(), result),
+        );
 
         Ok(())
     }
@@ -1222,7 +1217,9 @@ mod tests {
         ];
         let buf = compiler.finish();
         assert_function_contents(buf.code(), expected);
-        assert_eq!(object::decode_integer(buf.make_executable()?.exec()), 1);
+        let mut exec = buf.make_executable()?;
+        let result = exec.exec();
+        assert_eq!(Object::decode(exec.heap(), result), Object::Integer(1));
         Ok(())
     }
 
@@ -1249,7 +1246,9 @@ mod tests {
         ];
         let buf = compiler.finish();
         assert_function_contents(buf.code(), expected);
-        assert_eq!(object::decode_integer(buf.make_executable()?.exec()), 2);
+        let mut exec = buf.make_executable()?;
+        let result = exec.exec();
+        assert_eq!(Object::decode(exec.heap(), result), Object::Integer(2));
         Ok(())
     }
 }
